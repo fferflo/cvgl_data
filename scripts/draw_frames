@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+
+import os, imageio, tqdm, tinylogdir, argparse, sys, math, pickle, cvgl_data, cosy, yaml
+import numpy as np
+import pypeln as pl
+import tiledwebmaps as twm
+from pyquaternion import Quaternion
+from scipy.spatial.transform import Rotation as R
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--output", type=str, required=True)
+parser.add_argument("--num", type=int, default=-1)
+parser.add_argument("--stride", type=int, default=1)
+parser.add_argument("--no-aerial", action="store_true")
+parser.add_argument("--no-ground", action="store_true")
+parser.add_argument("--no-multi-threading", action="store_true")
+parser.add_argument("--ground-point-radius", type=float, default=None)
+parser.add_argument("--aerial-point-radius", type=float, default=1.5)
+parser.add_argument("--dataset", type=str, required=True)
+parser.add_argument("--location", type=str, default=None)
+parser.add_argument("--config", type=str, required=True)
+parser.add_argument("--tileloader", type=str, required=True)
+args = parser.parse_args()
+
+if args.num == 0:
+    sys.exit(0)
+
+log = tinylogdir.LogDir(args.output)
+
+meters_per_pixel = 0.1
+aerial_image_shape = np.asarray([1024, 1024])
+
+
+
+with open(args.config, "r") as f:
+    config = yaml.safe_load(f)
+tileloader, tileloader_zoom = twm.from_config(config)[args.tileloader]
+scenes = cvgl_data.load(
+    config["datasets"][args.dataset],
+    cam_ops=[ # Uncomment to test cam_ops:
+        # cvgl_data.cam_ops.Tile(tile_shape=(320, 320), tile_crop_margin=(50, 50)),
+        # cvgl_data.cam_ops.ResizeBy(1.5),
+        # cvgl_data.cam_ops.ConstantHomography(cosy.Rigid(
+        #     rotation=R.from_rotvec(math.radians(10) * np.array([0, 1, 0])).as_matrix(),
+        # )),
+        # cvgl_data.cam_ops.AlignToZHomography(use_world_z=True),
+    ],
+    updates=[os.path.join(p, args.tileloader) for p in config["updates"]] if ("updates" in config and not config["updates"] is None) else None,
+)
+if not args.location is None:
+    scenes = [scene for scene in scenes if scene.location == args.location]
+twm_scene = cvgl_data.load_tiledwebmaps(tileloader, args.tileloader, tileloader_zoom)
+
+frame_ids = [(scene, timestamp) for scene in scenes for timestamp in scene.camera.values()[0].timestamps]
+found_frame_ids = len(frame_ids)
+assert len(frame_ids) > 0
+frame_ids = frame_ids[::args.stride]
+if args.num < 0:
+    args.num = len(frame_ids)
+if len(frame_ids) > args.num:
+    frame_ids = frame_ids[::len(frame_ids) // args.num][:args.num]
+assert len(frame_ids) <= args.num
+print(f"Found {found_frame_ids} frames, saving {len(frame_ids)} frames")
+
+if args.no_multi_threading:
+    pl = pl.sync
+else:
+    pl = pl.thread
+stream = frame_ids
+
+# Convert frame
+@lambda f: (lambda x: f(*x))
+def load(scene, timestamp):
+    ground_frame = scene.load(timestamp) #.move_ego(cosy.Rigid(translation=[10.0, 0.0, 0.0], rotation=Quaternion(axis=(-0.3, 1.2, 0.4), radians=2.0).rotation_matrix))
+    latlon, bearing = ground_frame.geopose.latlon, ground_frame.geopose.bearing
+    # latlon = cosy.geo.move_from_latlon(ground_frame.geopose.latlon, 90, 25.0)
+    # bearing = ground_frame.geopose.bearing + 45.0
+    aerial_frame = twm_scene.load(latlon, bearing, meters_per_pixel, aerial_image_shape)
+
+    if args.no_aerial:
+        aerial_image = None
+    else:
+        aerial_image = cvgl_data.visualize.draw_paired_frame(ground_frame, aerial_frame, points_alpha=1.0, radius=args.aerial_point_radius, color=(255, 242, 0))
+
+    if args.no_ground:
+        ground_images = None
+        camera_names = None
+    else:
+        ground_images = [cvgl_data.visualize.draw_camera(camera, points=ground_frame.lidar.points, points_alpha=0.5, radius=args.ground_point_radius) for camera in ground_frame.camera.values()]
+        camera_names = ground_frame.camera.keys()
+
+    return f"{ground_frame.name}", camera_names, aerial_image, ground_images
+stream = pl.map(load, stream, workers=12, maxsize=12)
+
+# Convert frame
+@lambda f: (lambda x: f(*x))
+def save(name, camera_names, aerial_image, ground_images):
+    if not args.no_aerial:
+        imageio.imwrite(os.path.join(log.dir(), f"{name}-aerial.jpg"), aerial_image.astype("uint8"))
+
+    if not args.no_ground:
+        for ground_image, camera_name in zip(ground_images, camera_names):
+            imageio.imwrite(os.path.join(log.dir(), f"{name}-ground-{camera_name}.jpg"), ground_image)
+stream = pl.map(save, stream, workers=12, maxsize=12)
+
+for _ in tqdm.tqdm(stream, total=len(frame_ids)):
+    pass

@@ -1,0 +1,471 @@
+#!/usr/bin/env python3
+
+import argparse, os, docker, shutil, rosbag, tqdm, sys, yaml, threading, cosy, math, imageio
+import open3d as o3d
+import numpy as np
+from pyquaternion import Quaternion
+from collections import defaultdict
+from functools import partial
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--path", type=str, required=True, help="Directory where dataset will be stored")
+parser.add_argument("--image", type=str, default="ford-avdata-convert", help="Name of docker image to be built")
+parser.add_argument("--container", type=str, default="ford-avdata-convert", help="Name of docker container to be run")
+parser.add_argument("--timeout", type=float, default=30.0, help="Time to wait after last converted message before stopping the docker image")
+parser.add_argument("--rate", type=float, default=1.0, help="Rate at which to playback the rosbag file")
+parser.add_argument("--queue_size", type=int, default=99999999, help="Size of subscriber and publisher queues of all ros nodes")
+parser.add_argument("--min-pixels", type=int, default=-1)
+args = parser.parse_args()
+
+if not os.path.isdir(args.path):
+    os.makedirs(args.path)
+
+import cvgl_data
+
+def rostransform_to_transform(pose):
+    return cosy.Rigid(
+        translation=np.asarray([pose["translation"]["x"], pose["translation"]["y"], pose["translation"]["z"]]),
+        rotation=Quaternion(np.asarray([pose["rotation"]["w"], pose["rotation"]["x"], pose["rotation"]["y"], pose["rotation"]["z"]])).rotation_matrix,
+    )
+
+def fix_intr(intr, old_resolution, new_resolution):
+    intr = np.copy(intr)
+    intr[:2, :] *= (np.asarray(new_resolution) / np.asarray(old_resolution))[::-1, np.newaxis]
+    return intr
+
+oldworld_to_world = cosy.Rigid(rotation=np.asarray([[0, 1, 0], [1, 0, 0], [0, 0, -1]], dtype="float32"))
+body_to_ego =   cosy.Rigid(translation=np.asarray([0.0, 0.0, 0.29])) \
+              * cosy.Rigid(rotation=Quaternion(axis=(1, 0, 0), radians=math.pi).rotation_matrix)
+
+world_to_epsg3857 = cosy.proj.eastnorthmeters_at_latlon_to_epsg3857(np.asarray([42.294319, -83.223275]))
+epsg4326_to_epsg3857 = cosy.proj.Transformer("epsg:4326", "epsg:3857")
+epsg3857_to_epsg4326 = epsg4326_to_epsg3857.inverse()
+
+download_path = os.path.join(args.path, "download")
+
+base_url = "https://ford-multi-av-seasonal.s3-us-west-2.amazonaws.com"
+cameras = ["RR", "RL", "SR", "SL", "FR", "FL", "Center"]
+logs = ["Log1", "Log2", "Log3", "Log4", "Log5", "Log6"]
+series = [
+    ("2017-10-26", [
+        ("V2", logs, cameras),
+    ]),
+    ("2017-08-04", [
+        ("V2", logs, cameras),
+        ("V3", logs, set(cameras).difference(set(["RL"]))),
+    ]),
+    ("2017-07-24", [
+        ("V1", set(logs).difference(set(["Log5"])), cameras),
+        ("V2", logs, cameras),
+    ]),
+]
+cars = ["V1", "V2", "V3"]
+
+# Download and extract calibration
+for car in cars:
+    file = os.path.join(download_path, f"Calibration-{car}.tar.gz")
+    cvgl_data.prepare.download(f"{base_url}/Calibration/{os.path.basename(file)}", file)
+    cvgl_data.prepare.extract(file, download_path)
+
+# Extract transforms and camera parameters
+transforms = defaultdict(dict)
+camera_params = defaultdict(dict)
+for config_path in [os.path.join(download_path, d) for d in os.listdir(download_path) if d.startswith("V")]:
+    car = os.path.basename(config_path)
+    for config_file in [os.path.join(config_path, f) for f in os.listdir(config_path) if not "Intensity" in f and f.endswith(".yaml")]:
+        with open(config_file, "r") as f:
+            config = yaml.safe_load(f)
+            if "transform" in config:
+                transform = rostransform_to_transform(config["transform"])
+                parent_frame = config["header"]["frame_id"]
+                child_frame = config["child_frame_id"]
+                transforms[car][(child_frame, parent_frame)] = transform
+            if "height" in config:
+                resolution = [int(config["height"]), int(config["width"])]
+                intr = np.asarray(config["K"]).reshape([3, 3]).tolist()
+                camera = os.path.basename(config_file)
+                assert camera.startswith("camera") and "Intrinsics" in camera
+                camera = camera[6:-15]
+                camera = {
+                    "Center": "Center",
+                    "FrontLeft": "FL",
+                    "FrontRight": "FR",
+                    "RearLeft": "RL",
+                    "RearRight": "RR",
+                    "SideLeft": "SL",
+                    "SideRight": "SR",
+                }[camera]
+                camera_params[car][camera] = (intr, resolution)
+
+# Download and extract camera images and rosbags, write camera metadata
+for date, drives in series:
+    for car, logs, cameras in drives:
+        for log in logs:
+            scene_name = f"{date}-{car}-{log}"
+            scene_path = os.path.join(args.path, scene_name)
+
+            for camera in cameras:
+                # Download and resize
+                camera_path = os.path.join(scene_path, "camera", camera)
+                images_path = os.path.join(camera_path, "images")
+                zipfile = os.path.join(download_path, f"{date}-{car}-{log}-{camera}.tar.gz")
+                resize = False
+                if not os.path.isdir(images_path):
+                    cvgl_data.prepare.download(f"{base_url}/{date}/{car}/{log}/{os.path.basename(zipfile)}", zipfile)
+                    resize = True # TODO: remove
+                if os.path.isfile(zipfile):
+                    cvgl_data.prepare.extract(zipfile, images_path)
+                    resize = True # TODO: remove
+                if resize and args.min_pixels > 0:
+                    cvgl_data.prepare.resize(images_path, (args.min_pixels, args.min_pixels))
+
+                # Timestamps
+                timestamps = np.asarray(sorted([int(f[:-4]) for f in os.listdir(images_path)]))
+                np.savez_compressed(os.path.join(camera_path, f"timestamps.npz"), timestamps=timestamps)
+
+                # Transforms
+                camera_snake_case = {
+                    "Center": "center",
+                    "FL": "front_left",
+                    "FR": "front_right",
+                    "RL": "rear_left",
+                    "RR": "rear_right",
+                    "SL": "side_left",
+                    "SR": "side_right",
+                }[camera]
+                cam_to_body = transforms[car][(f"camera_{camera_snake_case}", "body")]
+                cam_to_ego = body_to_ego * cam_to_body
+
+                # Metadata
+                old_resolution = camera_params[car][camera][1]
+                new_resolution = list(imageio.imread(os.path.join(images_path, f"{timestamps[0]}.jpg")).shape[:2])
+                metadata = {
+                    "filetype": "jpg",
+                    "intr": fix_intr(camera_params[car][camera][0], old_resolution, new_resolution).tolist(),
+                    "resolution": new_resolution,
+                    "timestamps": {
+                        "first": int(timestamps[0]),
+                        "last": int(timestamps[-1]),
+                        "num": int(timestamps.shape[0]),
+                        "dt": float(timestamps[-1] - timestamps[0]) / timestamps.shape[0],
+                    },
+                    "cam_to_ego": {
+                        "translation": cam_to_ego.translation.tolist(),
+                        "rotation": cam_to_ego.rotation.tolist(),
+                    },
+                }
+
+                with open(os.path.join(camera_path, f"config.yaml"), "w") as f:
+                    yaml.dump(metadata, f, default_flow_style=False)
+
+            rosbag_file = os.path.join(download_path, f"{date}-{car}-{log}.bag")
+            cvgl_data.prepare.download(f"{base_url}/{date}/{car}/{log}/{os.path.basename(rosbag_file)}", rosbag_file)
+
+
+
+
+def rospose_to_transform(pose):
+    return cosy.Rigid(
+        translation=np.asarray([pose.position.x, pose.position.y, pose.position.z]),
+        rotation=Quaternion(np.asarray([pose.orientation.w, pose.orientation.x, pose.orientation.y, pose.orientation.z])).rotation_matrix,
+    )
+
+def rostransform_to_transform(pose):
+    return cosy.Rigid(
+        translation=np.asarray([pose.translation.x, pose.translation.y, pose.translation.z]),
+        rotation=Quaternion(np.asarray([pose.rotation.w, pose.rotation.x, pose.rotation.y, pose.rotation.z])).rotation_matrix,
+    )
+
+def quaternion_to_rotationmatrix(q):
+    return Quaternion(np.asarray([q.w, q.x, q.y, q.z])).rotation_matrix
+
+def stamp_to_us(stamp):
+    return int(stamp.secs * 10 ** 6 + stamp.nsecs / (10 ** 3))
+
+def lerp_all(query_xs, value_xs, value_ys, lerp=lambda y1, y2, amount: (1 - amount) * y1 + amount * y2):
+    query_ys = np.asarray([value_ys[0]] * len(query_xs))
+    value_index = 0
+    def interpolate_at(query_x):
+        if value_index == 0:
+            return value_ys[0]
+        elif value_index == len(value_xs):
+            return value_ys[-1]
+        else:
+            x1 = value_xs[value_index - 1]
+            x2 = value_xs[value_index]
+            amount = (query_x - x1) / (x2 - x1)
+            assert 0 <= amount and amount <= 1
+            return lerp(value_ys[value_index - 1], value_ys[value_index], amount=amount)
+
+    for query_index in range(len(query_xs)):
+        query_x = query_xs[query_index]
+        while query_x > value_xs[value_index]:
+            value_index += 1
+
+        query_ys[query_index] = interpolate_at(query_x)
+
+    return query_ys
+
+print("Saving transforms...")
+for bagfile in tqdm.tqdm([os.path.join(download_path, f) for f in sorted(os.listdir(download_path)) if f.endswith(".bag")]):
+    scene_name = os.path.basename(bagfile[:-4])
+    scene_path = os.path.join(args.path, scene_name)
+    car = scene_name[11:13]
+    imu_to_body = transforms[car][(f"imu", "body")]
+    imu_to_ego = body_to_ego * imu_to_body
+
+    odometry_path = os.path.join(scene_path, "odometry")
+    if not os.path.isdir(odometry_path):
+        os.makedirs(odometry_path)
+
+    pose_ground_truth = []
+    gps = []
+    imu = []
+    velocity_raw = []
+    with rosbag.Bag(bagfile, "r") as bag:
+        for (topic, msg, ts) in bag.read_messages(topics="/pose_ground_truth"):
+            assert msg.header.frame_id == "map"
+            timestamp = stamp_to_us(msg.header.stamp)
+            transform = rospose_to_transform(msg.pose)
+            pose_ground_truth.append((timestamp, transform))
+        for (topic, msg, ts) in bag.read_messages(topics="/gps"):
+            gps.append((stamp_to_us(msg.header.stamp), (msg.latitude, msg.longitude)))
+        for (topic, msg, ts) in bag.read_messages(topics="/imu"):
+            assert msg.header.frame_id == "imu"
+            imu.append((
+                stamp_to_us(msg.header.stamp),
+                np.asarray([msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z]),
+                np.asarray([msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z]),
+            ))
+        for (topic, msg, ts) in bag.read_messages(topics="/velocity_raw"):
+            assert msg.header.frame_id == "map"
+            velocity_raw.append((
+                stamp_to_us(msg.header.stamp),
+                np.asarray([msg.vector.x, msg.vector.y, msg.vector.z]),
+            ))
+
+    # ego_to_world
+    ego_to_world_timestamps = np.asarray([p[0] for p in pose_ground_truth])
+    ego_to_world_transforms = [oldworld_to_world * p[1] * body_to_ego.inverse() for p in pose_ground_truth]
+
+    np.savez_compressed(
+        os.path.join(scene_path, "ego_to_world.npz"),
+        timestamps=ego_to_world_timestamps,
+        transforms=np.asarray([t.to_matrix() for t in ego_to_world_transforms]),
+    )
+
+    # geopose
+    gps_dict = defaultdict(list)
+    for t, latlon in gps:
+        gps_dict[t].append(latlon)
+    gps = sorted([(t, np.mean(l, axis=0)) for t, l in gps_dict.items()], key=lambda x: x[0])
+    gps_timestamps = np.asarray([x[0] for x in gps])
+    get_latlon = partial(
+        cosy.lerp,
+        xs=[x[0] for x in gps],
+        ys=[x[1] for x in gps],
+    )
+
+    def to2d(frame_to_world):
+        return cosy.Rigid(
+            rotation=cosy.angle_to_rotation_matrix(cosy.angle(np.asarray([1.0, 0.0]), (frame_to_world.rotation @ np.asarray([1.0, 0.0, 0.0]))[:2])),
+            translation=frame_to_world.translation[:2],
+        )
+
+    pose_graph = cvgl_data.g2o.PoseGraph()
+    latlons_at_timestamps = lerp_all(ego_to_world_timestamps, [x[0] for x in gps], [x[1] for x in gps])
+    for index, (timestamp, ego_to_world) in enumerate(zip(ego_to_world_timestamps, ego_to_world_transforms)):
+        if gps[0][0] <= timestamp and timestamp <= gps[-1][0]:
+            gps_to_world_translation = world_to_epsg3857.inverse()(epsg4326_to_epsg3857(latlons_at_timestamps[index]))
+        else:
+            gps_to_world_translation = None
+        pose_graph.add_frame(
+            frame_to_world=to2d(ego_to_world),
+            gps_to_world_translation=gps_to_world_translation,
+            gps_confidence=0.01,
+        )
+    pose_graph.optimize(verbose=True)
+
+    def to_geopose(ego_to_world_2d):
+        latlon = epsg4326_to_epsg3857.inverse()(world_to_epsg3857(ego_to_world_2d.translation))
+        bearing = math.degrees(epsg3857_to_epsg4326.transform_angle(cosy.rotation_matrix_to_angle(world_to_epsg3857.rotation @ ego_to_world_2d.rotation)))
+        return latlon, bearing
+    geoposes = [to_geopose(t) for t in pose_graph.get_frame_to_world()]
+
+    np.savez_compressed(
+        os.path.join(scene_path, "geopose.npz"),
+        timestamps=ego_to_world_timestamps,
+        latlons=np.asarray([p[0] for p in geoposes]),
+        bearings=np.asarray([p[1] for p in geoposes]),
+    )
+
+    # velocity
+    velocity_raw = [(t, v) for t, v in velocity_raw if ego_to_world_timestamps[0] <= t and t <= ego_to_world_timestamps[-1]]
+    velocity_timestamps = [x[0] for x in velocity_raw]
+    ego_to_world_at_velts = lerp_all(velocity_timestamps, ego_to_world_timestamps, ego_to_world_transforms, lerp=cosy.Rigid.slerp)
+    assert len(ego_to_world_at_velts) == len(velocity_raw)
+    velocity_vectors_ego = [ego_to_world.inverse().rotation @ velocity_world for (_, velocity_world), ego_to_world in zip(velocity_raw, ego_to_world_at_velts)]
+
+    np.savez_compressed(
+        os.path.join(scene_path, "odometry", "linear_velocity.npz"),
+        timestamps=velocity_timestamps,
+        values=velocity_vectors_ego,
+    )
+
+    # imu
+    imu_timestamp_to_data = {x[0]: x for x in imu}
+    imu = [imu_timestamp_to_data[t] for t in sorted(list(imu_timestamp_to_data.keys()))]
+    assert np.all(imu[:-1][0] < imu[1:][0])
+    imu_timestamps = [x[0] for x in imu]
+
+    angular_velocity = np.asarray([p[1] for p in imu]) # n 3
+    angular_velocity = (imu_to_ego.rotation @ angular_velocity.T).T
+    np.savez_compressed(
+        os.path.join(scene_path, "odometry", "angular_velocity.npz"),
+        timestamps=imu_timestamps,
+        values=angular_velocity,
+    )
+
+    linear_acceleration = np.asarray([p[2] for p in imu]) # n 3
+    linear_acceleration = (imu_to_ego.rotation @ linear_acceleration.T).T
+    np.savez_compressed(
+        os.path.join(scene_path, "odometry", "linear_acceleration.npz"),
+        timestamps=imu_timestamps,
+        values=linear_acceleration,
+    )
+
+
+
+
+# #################### Convert bagfiles to pointcloud files ####################
+colors = ["red", "blue", "green", "yellow"]
+root_path = os.path.dirname(os.path.abspath(sys.argv[0]))
+
+client = docker.from_env()
+
+print(f"Building docker image {args.image}")
+image, docker_build_logs = client.images.build(path=os.path.join(root_path, "ford_avdata_util"), tag=args.image)
+
+bagfiles = sorted([os.path.join(download_path, f) for f in os.listdir(download_path) if f.endswith(".bag")])
+print(f"Running for {len(bagfiles)} rosbag files")
+
+for bagfile in bagfiles:
+    scene_name = os.path.basename(bagfile[:-4])
+    scene_path = os.path.join(args.path, scene_name)
+    car = scene_name[11:13]
+
+    print(f"##################### {os.path.basename(bagfile)} #####################")
+    docker_output_path = os.path.join("/ford-avdata-data", os.path.basename(bagfile)[:-4])
+    docker_bagfile = os.path.join("/ford-avdata-data", os.path.basename(bagfile))
+    host_output_path = os.path.join(download_path, os.path.basename(bagfile)[:-4])
+    try:
+        print(f"Starting container {args.image}")
+        for color in colors:
+            color_path = os.path.join(host_output_path, "lidar", color)
+            if not os.path.isdir(color_path):
+                os.makedirs(color_path)
+        volumes = {download_path: {"bind": "/ford-avdata-data", "mode": "rw"}}
+        container = client.containers.run(image=image, name=args.container, command=f"/bin/bash", volumes=volumes, remove=True, stdin_open=True, detach=True, tty=True)
+
+        print("Checking rosbag contents")
+        cmd = f"rosbag info {docker_bagfile} --yaml --key=topics"
+        print("> " + cmd)
+        exit_code, logs = container.exec_run(f"bash -c 'source /ford-avdata-code/entrypoint.sh && {cmd}'")
+        logs = logs.decode()
+        if exit_code != 0:
+            print(f"Failed command with exit code {exit_code}")
+            print(logs)
+            container.stop()
+            sys.exit(-1)
+        message_nums = {n["topic"]: int(n["messages"]) for n in yaml.safe_load(logs) if n["topic"].startswith("/lidar") or n["topic"] == "/pose_ground_truth"}
+        print(f"Expecting messages: {message_nums}")
+
+        print("Converting point clouds from rosbag to pcd files")
+        cmd = f"roslaunch /ford-avdata-code/convert.launch bag:={docker_bagfile} output_path:={docker_output_path} rate:={args.rate} queue_size:={args.queue_size}"
+        print("> " + cmd)
+        _, logs = container.exec_run(f"bash -c 'source /ford-avdata-code/entrypoint.sh && {cmd}'", stream=True)
+
+        # Wait for conversion to finish, i.e. when no message is received from docker image for specified timeout
+        exit_event = threading.Event()
+        def read():
+            for line in logs:
+                # print(line.decode("utf-8"))
+                exit_event.set()
+        read_thread = threading.Thread(target=read)
+        read_thread.start()
+        while exit_event.wait(args.timeout):
+            exit_event.clear()
+        container.stop()
+        read_thread.join()
+    except KeyboardInterrupt:
+        print("Stopping...")
+        container.stop()
+        sys.exit(-1)
+
+    # Check if any messages are missing
+    fail = False
+    for color in colors:
+        color_path = os.path.join(host_output_path, "lidar", color)
+        expected_messages = message_nums[f"/lidar_{color}_scan"]
+        got_messages = len(os.listdir(color_path))
+        if expected_messages != got_messages:
+            print(f"Expected {expected_messages} messages for color {color}, but found {got_messages} saved files")
+            fail = True
+    if fail:
+        print("Rosbag conversion failed. Try a smaller --rate")
+        sys.exit(-1)
+
+    os.remove(bagfile)
+
+    print("Converting point clouds from pcd files to npz files")
+    paths = []
+    for color in colors:
+        color_path = os.path.join(host_output_path, "lidar", color)
+        paths = paths + [(os.path.join(color_path, f), color) for f in os.listdir(color_path)]
+    for pcd_file, color in tqdm.tqdm(paths):
+        pcd = o3d.io.read_point_cloud(pcd_file)
+        points_lidar = np.asarray(pcd.points)
+
+        lidar_to_body = transforms[car][(f"lidar_{color}", "body")]
+        lidar_to_ego = body_to_ego * lidar_to_body
+        points_ego = lidar_to_ego(points_lidar)
+
+        out_path = os.path.join(scene_path, "lidar", color, "points")
+        if not os.path.isdir(out_path):
+            os.makedirs(out_path)
+        np.savez_compressed(os.path.join(out_path, os.path.basename(pcd_file)[:-4] + ".npz"), points_ego.astype("float32"))
+        os.remove(pcd_file)
+
+    for color in colors:
+        lidar_path = os.path.join(scene_path, "lidar", color)
+
+        # Timestamps
+        timestamps = np.asarray(sorted([int(f[:-4]) for f in os.listdir(os.path.join(lidar_path, "points"))]))
+        np.savez_compressed(os.path.join(lidar_path, f"timestamps.npz"), timestamps=timestamps)
+
+        # Metadata
+        metadata = {
+            "timestamps": {
+                "first": int(timestamps[0]),
+                "last": int(timestamps[-1]),
+                "num": int(timestamps.shape[0]),
+                "dt": float(timestamps[-1] - timestamps[0]) / timestamps.shape[0],
+            },
+        }
+
+        with open(os.path.join(lidar_path, f"config.yaml"), "w") as f:
+            yaml.dump(metadata, f, default_flow_style=False)
+
+    # Metadata
+    metadata = {
+        "location": "detroit",
+        "dataset": "ford-avdata",
+    }
+
+    with open(os.path.join(scene_path, f"config.yaml"), "w") as f:
+        yaml.dump(metadata, f, default_flow_style=False)
+
+shutil.rmtree(download_path)
+
+with open(os.path.join(args.path, "LICENSE"), "w") as f:
+    f.write("CC BY-NC-SA 4.0 https://avdata.ford.com/home/default.aspx")

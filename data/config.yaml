@@ -1,0 +1,15 @@
+tileloaders:
+  massgis19: # https://www.mass.gov/orgs/massgis-bureau-of-geographic-information
+    uri: "https://tiles.arcgis.com/tiles/hGdibHYSPO59RG1h/arcgis/rest/services/USGS_Orthos_2019/MapServer/tile/{zoom}/{y}/{x}"
+    path: "/path/to/massgis19"
+    zoom: 20
+  massgis21: # https://www.mass.gov/orgs/massgis-bureau-of-geographic-information
+    uri: "https://tiles.arcgis.com/tiles/hGdibHYSPO59RG1h/arcgis/rest/services/orthos2021/MapServer/tile/{zoom}/{y}/{x}"
+    path: "/path/to/massgis21"
+    zoom: 20
+
+updates: # Earlier entries overwrite later entries
+  - /path/to/pseudolabels # This directory should contain one folder per tileloader, with the same name as the tileloader
+datasets:
+  argoverse-v1: /path/to/argoverse-v1
+  nuscenes: /path/to/nuscenes

@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+
+import cvgl_data, shutil, tqdm, cosy, json, yaml, math, imageio, os, argparse
+from pyquaternion import Quaternion
+import pandas as pd
+import pandas as pd
+import numpy as np
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--path", type=str, required=True)
+parser.add_argument("--min-pixels", type=int, default=-1)
+args = parser.parse_args()
+
+files = [
+    "pandaset_0.zip",
+    "pandaset_1.zip",
+    "pandaset_2.zip",
+]
+
+for file in files:
+    if not os.path.isfile(os.path.join(args.path, file)):
+        print("Please download and place into the folder specified by --path:")
+        print("    Part 1: pandaset_0.zip")
+        print("    Part 2: pandaset_1.zip")
+        print("    Part 3: pandaset_2.zip")
+        sys.exit(-1)
+
+download_path = os.path.join(args.path, "download")
+os.makedirs(download_path)
+for f in files:
+    shutil.move(os.path.join(args.path, f), os.path.join(download_path, f))
+
+for file in files:
+    cvgl_data.prepare.extract(os.path.join(download_path, file), download_path)
+
+if args.min_pixels > 0:
+    cvgl_data.prepare.resize(download_path, (args.min_pixels, args.min_pixels))
+
+shutil.copy(os.path.join(download_path, "001", "LICENSE.txt"), os.path.join(args.path, "LICENSE.txt"))
+
+
+
+def to2d(frame_to_world): # TODO: this is used in every dataset script
+    return cosy.Rigid(
+        rotation=cosy.angle_to_rotation_matrix(cosy.angle(np.asarray([1.0, 0.0]), (frame_to_world.rotation @ np.asarray([1.0, 0.0, 0.0]))[:2])),
+        translation=frame_to_world.translation[:2],
+    )
+
+def fix_intr(intr, old_resolution, new_resolution): # TODO: this is used in every dataset script
+    intr = np.copy(intr)
+    intr[:2, :] *= (np.asarray(new_resolution) / np.asarray(old_resolution))[::-1, np.newaxis]
+    return intr
+
+def json_to_transform(data):
+    return cosy.Rigid(
+        rotation=Quaternion(np.asarray([data["heading"]["w"], data["heading"]["x"], data["heading"]["y"], data["heading"]["z"]], dtype="float")).rotation_matrix,
+        translation=np.asarray([data["position"]["x"], data["position"]["y"], data["position"]["z"]], dtype="float"),
+    )
+
+# Constants
+lidar_to_ego =   cosy.Rigid(translation=np.asarray([0.0, 0.0, 0.25])) \
+               * cosy.Rigid(rotation=Quaternion(axis=(0, 0, 1), radians=-math.pi / 2).rotation_matrix)
+original_image_shape = np.asarray([1080, 1920])
+latitude_split = 37.66016386784476 # Pandaset contains two locations, one above this latitude and one below
+epsg3857 = cosy.proj.CRS("epsg:3857")
+epsg4326_to_epsg3857 = cosy.proj.Transformer("epsg:4326", "epsg:3857")
+epsg3857_to_epsg4326 = epsg4326_to_epsg3857.inverse()
+
+
+for scene_name in tqdm.tqdm([scene_name for scene_name in sorted(os.listdir(download_path))], desc="Scenes"):
+    src_scene_path = os.path.join(download_path, scene_name)
+    dest_scene_path = os.path.join(args.path, scene_name)
+
+    cameras = []
+    for camera_name in os.listdir(os.path.join(src_scene_path, "camera")):
+        src_camera_path = os.path.join(src_scene_path, "camera", camera_name)
+        with open(os.path.join(src_camera_path, "poses.json")) as f:
+            cam_to_world = [json_to_transform(data) for data in json.load(f)]
+        with open(os.path.join(src_camera_path, "intrinsics.json")) as f:
+            data = json.load(f)
+            intr = np.asarray([[data["fx"], 0.0, data["cx"]], [0.0, data["fy"], data["cy"]], [0.0, 0.0, 1.0]], dtype="float64")
+        cameras.append((camera_name, cam_to_world, intr))
+
+    with open(os.path.join(src_scene_path, "lidar", "poses.json")) as f:
+        lidar_to_world = [json_to_transform(data) for data in json.load(f)]
+
+    with open(os.path.join(src_scene_path, "meta", "gps.json")) as f:
+        latlons = [np.asarray([data["lat"], data["long"]]) for data in json.load(f)]
+
+    with open(os.path.join(src_scene_path, "meta", "timestamps.json")) as f:
+        timestamps = (np.asarray(json.load(f)).astype("float64") * (10 ** 6)).astype("uint64")
+
+    assert len(latlons) == len(timestamps)
+    assert len(latlons) == len(lidar_to_world)
+    for camera_name, cam_to_world, intr in cameras:
+        assert len(cam_to_world) == len(latlons)
+
+    # Align poses with gps track
+    positions_world = [t.translation[:2] for t in lidar_to_world]
+    positions_epsg3857 = [epsg4326_to_epsg3857(latlon) for latlon in latlons]
+    world_to_epsg3857 = cosy.Rigid.least_squares(
+        from_points=positions_world,
+        to_points=positions_epsg3857,
+    )
+
+
+
+    # Cameras
+    for camera_name, cam_to_world, intr in cameras:
+        dest_camera_path = os.path.join(dest_scene_path, "camera", camera_name)
+        dest_images_path = os.path.join(dest_camera_path, "images")
+        os.makedirs(dest_images_path)
+
+        for index_in_scene in range(len(latlons)):
+            shutil.copy(
+                os.path.join(src_scene_path, "camera", camera_name, f"{index_in_scene:02d}.jpg"),
+                os.path.join(dest_images_path, f"{timestamps[index_in_scene]}.jpg"),
+            )
+
+        cam_to_ego = [lidar_to_ego * lidar_to_world[i].inverse() * cam_to_world[i] for i in range(len(latlons))]
+        np.savez_compressed(
+            os.path.join(dest_camera_path, "cam_to_ego.npz"),
+            timestamps=timestamps,
+            transforms=np.asarray([t.to_matrix() for t in cam_to_ego]),
+        )
+
+        # Metadata
+        old_resolution = original_image_shape
+        new_resolution = list(imageio.imread(os.path.join(dest_images_path, f"{timestamps[0]}.jpg")).shape[:2])
+        metadata = {
+            "filetype": "jpg",
+            "intr": fix_intr(intr, old_resolution, new_resolution).tolist(),
+            "resolution": new_resolution,
+            "timestamps": {
+                "first": int(timestamps[0]),
+                "last": int(timestamps[-1]),
+                "num": int(timestamps.shape[0]),
+                "dt": float(timestamps[-1] - timestamps[0]) / timestamps.shape[0],
+            },
+        }
+
+        with open(os.path.join(dest_camera_path, f"config.yaml"), "w") as f:
+            yaml.dump(metadata, f, default_flow_style=False)
+
+    # ego_to_world
+    ego_to_world_transforms = [lidar_to_world[index_in_scene] * lidar_to_ego.inverse() for index_in_scene in range(len(latlons))] # origego_to_world
+    np.savez_compressed(
+        os.path.join(dest_scene_path, "ego_to_world.npz"),
+        timestamps=timestamps,
+        transforms=np.asarray([t.to_matrix() for t in ego_to_world_transforms]),
+    )
+
+    # Geopose
+    latlons = []
+    bearings = []
+    for ego_to_world in ego_to_world_transforms:
+        ego_to_world = to2d(ego_to_world)
+        latlons.append(epsg3857_to_epsg4326(world_to_epsg3857(ego_to_world.translation)))
+        bearings.append(math.degrees(epsg3857_to_epsg4326.transform_angle(cosy.rotation_matrix_to_angle(world_to_epsg3857.rotation @ ego_to_world.rotation))))
+    np.savez(os.path.join(dest_scene_path, "geopose.npz"),
+        timestamps=timestamps,
+        latlons=np.asarray(latlons).astype("float64"),
+        bearings=np.asarray(bearings).astype("float64"),
+    )
+
+    # Lidar
+    src_lidar_path = os.path.join(src_scene_path, "lidar")
+    dest_lidar_path = os.path.join(dest_scene_path, "lidar", "all")
+    dest_points_path = os.path.join(dest_lidar_path, "points")
+    os.makedirs(dest_points_path)
+
+    for index_in_scene, src_lidar_file in enumerate(sorted([os.path.join(src_lidar_path, f) for f in os.listdir(src_lidar_path) if f.endswith(".pkl.gz")])):
+        points = pd.read_pickle(src_lidar_file).to_numpy()[:, :3]
+        loaded_to_ego = lidar_to_ego * lidar_to_world[index_in_scene].inverse()
+        points = loaded_to_ego(points)
+        np.savez_compressed(os.path.join(dest_points_path, f"{timestamps[index_in_scene]}.npz"), points)
+
+    np.savez_compressed(os.path.join(dest_lidar_path, f"timestamps.npz"), timestamps=timestamps)
+
+    metadata = {
+        "timestamps": {
+            "first": int(timestamps[0]),
+            "last": int(timestamps[-1]),
+            "num": int(timestamps.shape[0]),
+            "dt": float(timestamps[-1] - timestamps[0]) / timestamps.shape[0],
+        },
+    }
+    with open(os.path.join(dest_lidar_path, f"config.yaml"), "w") as f:
+        yaml.dump(metadata, f, default_flow_style=False)
+
+    # Scene metadata
+    if latlons[0][0] > latitude_split:
+        location = "san francisco"
+    else:
+        location = "palo alto san mateo"
+    metadata = {
+        "location": location,
+        "dataset": "pandaset",
+    }
+    with open(os.path.join(dest_scene_path, f"config.yaml"), "w") as f:
+        yaml.dump(metadata, f, default_flow_style=False)
+
+
+    shutil.rmtree(src_scene_path)
+
+shutil.rmtree(download_path)
+
+with open(os.path.join(args.path, "LICENSE"), "w") as f:
+    f.write("CC BY 4.0 with additional terms https://scale.com/legal/pandaset-terms-of-use")

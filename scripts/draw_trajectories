@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+
+import os, imageio, tinylogdir, argparse, tqdm, cvgl_data, cosy, yaml, cv2
+import numpy as np
+import tiledwebmaps as twm
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--output", type=str, required=True)
+parser.add_argument("--downsample", type=int, default=4)
+parser.add_argument("--radius", type=int, default=2)
+parser.add_argument("--stride", type=float, default=0.25)
+parser.add_argument("--scenes", type=int, default=-1)
+parser.add_argument("--per-scene", action="store_true")
+parser.add_argument("--max-frames", type=int, default=-1)
+parser.add_argument("--dataset", type=str, required=True)
+parser.add_argument("--location", type=str, default=None)
+parser.add_argument("--config", type=str, required=True)
+parser.add_argument("--tileloader", type=str, required=True)
+parser.add_argument("--color-with-outlier-score", action="store_true")
+args = parser.parse_args()
+
+log = tinylogdir.LogDir(args.output)
+
+meters_per_pixel = 0.1
+aerial_image_shape = np.asarray([1024, 1024])
+
+with open(args.config, "r") as f:
+    config = yaml.safe_load(f)
+tileloader, tileloader_zoom = twm.from_config(config)[args.tileloader]
+location_to_scenes = cvgl_data.load(
+    config["datasets"][args.dataset],
+    as_dict=True,
+    updates=[os.path.join(p, args.tileloader) for p in config["updates"]] if ("updates" in config and not config["updates"] is None) else [],
+)
+
+if not args.location is None:
+    location_to_scenes = {location: [s for s in scenes if "0109" in s.scene_name] for location, scenes in location_to_scenes.items() if location == args.location}
+
+
+stride = args.stride * args.downsample
+bearing_stride = 5
+colormap = cv2.applyColorMap(np.asarray([np.arange(256).astype("uint8")]), cv2.COLORMAP_JET)[0, :, ::-1] # 256, 3
+
+for location, scenes in location_to_scenes.items():
+    if args.scenes > 0:
+        scenes = scenes[:args.scenes]
+
+    scenes_latlons = []
+    scenes_bearings = []
+    scenes_colors = []
+    for scene in scenes:
+        # Load and subsample
+        timestamps = scene.geopose.timestamps.tolist()
+        if args.max_frames > 0:
+            timestamps = timestamps[:args.max_frames]
+
+        geoposes = [scene.geopose.load(t) for t in timestamps]
+        latlons = [g.latlon for g in geoposes]
+        bearings = [g.bearing for g in geoposes]
+
+        index = 0
+        while index + 1 < len(latlons):
+            while index + 1 < len(latlons) and cosy.geo.distance(latlons[index], latlons[index + 1]) < stride:
+                del latlons[index + 1]
+                del bearings[index + 1]
+                del timestamps[index + 1]
+            index += 1
+
+        scenes_latlons.append(latlons)
+        scenes_bearings.append(bearings)
+
+        if args.color_with_outlier_score:
+            if not ("outlier_score" in scene.keys() and not scenes_colors is None):
+                print("Outlier scores not available")
+                sys.exit(-1)
+            outlier_scores = np.asarray([scene.outlier_score.load(t).score for t in timestamps])
+            outlier_scores = np.power(outlier_scores, 0.1)
+            amin, amax = np.amin(outlier_scores), np.amax(outlier_scores)
+            outlier_scores = (outlier_scores - amin) / (amax - amin)
+            colors = colormap[(outlier_scores * 255.999).astype("uint8")]
+            scenes_colors.append(colors)
+        else:
+            scenes_colors = None
+
+
+
+    if args.per_scene:
+        for i in tqdm.tqdm(list(range(len(scenes))), desc=location):
+            image = cvgl_data.visualize.draw_trajectories(
+                [scenes_latlons[i]],
+                tileloader,
+                zoom=tileloader_zoom,
+                bearings=[scenes_bearings[i]],
+                colors=[scenes_colors[i]] if not scenes_colors is None else None,
+                tile_padding=args.radius,
+                downsample=args.downsample,
+                bearing_stride=5,
+                verbose=False,
+            )
+            imageio.imwrite(os.path.join(log.dir(), f"{location}-{scenes[i].scene_name}.jpg"), image)
+    else:
+        image = cvgl_data.visualize.draw_trajectories(
+            scenes_latlons,
+            tileloader,
+            zoom=tileloader_zoom,
+            bearings=scenes_bearings,
+            colors=scenes_colors,
+            tile_padding=args.radius,
+            downsample=args.downsample,
+            bearing_stride=5,
+            verbose=True,
+        )
+        imageio.imwrite(os.path.join(log.dir(), f"{location}.jpg"), image)

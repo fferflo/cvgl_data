@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+
+import argparse, os
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--path", type=str, required=True)
+parser.add_argument("--min-pixels", type=int, default=-1)
+args = parser.parse_args()
+
+import cvgl_data, cosy, pyntcloud, imageio, tqdm, shutil, json, yaml, math
+from pyquaternion import Quaternion
+import numpy as np
+
+files = [
+    "tracking_train1_v1.1.tar.gz",
+    "tracking_train2_v1.1.tar.gz",
+    "tracking_train3_v1.1.tar.gz",
+    "tracking_train4_v1.1.tar.gz",
+    "tracking_val_v1.1.tar.gz",
+    "tracking_test_v1.1.tar.gz"
+]
+
+for file in files:
+    if not os.path.isfile(os.path.join(args.path, file)):
+        print("Please download from the Argoverse V1 website and place into the folder specified by --path:")
+        print("    Argoverse 3D Tracking v1.1 - Training Part 1")
+        print("    Argoverse 3D Tracking v1.1 - Training Part 2")
+        print("    Argoverse 3D Tracking v1.1 - Training Part 3")
+        print("    Argoverse 3D Tracking v1.1 - Training Part 4")
+        print("    Argoverse 3D Tracking v1.1 - Training Validation")
+        print("    Argoverse 3D Tracking v1.1 - Training Testing")
+        sys.exit(-1)
+
+download_path = os.path.join(args.path, "download")
+os.makedirs(download_path)
+for f in files:
+    shutil.move(os.path.join(args.path, f), os.path.join(download_path, f))
+
+download_path = os.path.join(args.path, "download")
+if not os.path.isdir(download_path):
+    os.makedirs(download_path)
+for url in urls:
+    file = os.path.join(download_path, url.split("/")[-1])
+    cvgl_data.prepare.download(url, file)
+    cvgl_data.prepare.extract(file, download_path)
+
+if args.min_pixels > 0:
+    cvgl_data.prepare.resize(os.path.join(args.path, "download"), (args.min_pixels, args.min_pixels), skip=lambda n: n.split("/")[-2] == ".ipynb_checkpoints")
+
+# Constants
+world_to_utm17n = {
+    "PIT": cosy.ScaledRigid(translation=np.asarray([606.2203524421202, -100.43711466901004]), rotation=np.asarray([[0.9999999907705954, -0.00013586319921505012], [0.00013586319921505012, 0.9999999907705954]]), scale=1.0000047172396858, dtype="float64") \
+            * cosy.Rigid(translation=(583710.0070, 4477259.9999)), # See argoverse paper
+    "MIA": cosy.ScaledRigid(translation=np.asarray([-325.1866905745119, -120.37690092204139]), rotation=np.asarray([[0.999999994881483, 0.0001011782277592008], [-0.0001011782277592008, 0.999999994881483]]), scale=1.0000625825743747, dtype="float64") \
+            * cosy.Rigid(translation=(580560.0088, 2850959.999)), # See argoverse paper
+}
+epsg4326_to_utm17n = cosy.proj.Transformer("epsg:4326", "epsg:32617")# UTM Zone 17 as specified by argoverse paper
+utm17n_to_epsg4326 = epsg4326_to_utm17n.inverse()
+ring_camera_names = ["ring_front_center", "ring_front_left", "ring_front_right", "ring_rear_left", "ring_rear_right", "ring_side_left", "ring_side_right"]
+stereo_camera_names = ["stereo_front_left", "stereo_front_right"]
+camera_names = ring_camera_names + stereo_camera_names
+original_image_shapes = {**{name: (1200, 1920) for name in ring_camera_names}, **{name: (2056, 2464) for name in stereo_camera_names}}
+origego_to_ego = cosy.Rigid(
+    translation=np.asarray([0.0, 0.0, 0.32])
+)
+
+path = os.path.join(download_path, "argoverse-tracking")
+shutil.copy(os.path.join(path, "Argoverse-Terms_of_Use.txt"), os.path.join(args.path, "Argoverse-Terms_of_Use.txt"))
+
+jobs = []
+for split in sorted(os.listdir(path)):
+    split_path = os.path.join(path, split)
+    if not os.path.isdir(split_path):
+        continue
+    for scene_name in sorted(os.listdir(split_path)):
+        scene_path = os.path.join(split_path, scene_name)
+        jobs.append((scene_name, scene_path))
+
+def fix_intr(intr, old_resolution, new_resolution): # TODO: this is used in every dataset script
+    intr = np.copy(intr)
+    intr[:2, :] *= (np.asarray(new_resolution) / np.asarray(old_resolution))[::-1, np.newaxis]
+    return intr
+
+def to2d(frame_to_world): # TODO: this is used in every dataset script
+    return cosy.Rigid(
+        rotation=cosy.angle_to_rotation_matrix(cosy.angle(np.asarray([1.0, 0.0]), (frame_to_world.rotation @ np.asarray([1.0, 0.0, 0.0]))[:2])),
+        translation=frame_to_world.translation[:2],
+    )
+
+def load_pose(path):
+    with open(path, "r") as f:
+        pose_data = json.load(f)
+    pose = cosy.Rigid(
+        rotation=Quaternion(np.array(pose_data["rotation"])).rotation_matrix,
+        translation=np.array(pose_data["translation"]),
+    )
+    return pose
+
+for scene_name, src_scene_path in tqdm.tqdm(sorted(jobs), desc="Scenes"):
+    dest_scene_path = os.path.join(args.path, scene_name)
+
+    # Load location
+    with open(os.path.join(src_scene_path, "city_info.json"), "r") as f:
+        city_name = json.load(f)["city_name"]
+
+    # Load camera calibrations
+    with open(os.path.join(src_scene_path, "vehicle_calibration_info.json"), "r") as f:
+        calib_data = json.load(f)
+    camera_params = {}
+    for camera_config in calib_data["camera_data_"]:
+        camera_name = camera_config["key"][len("image_raw_"):]
+        camera_config = camera_config["value"]
+        cam_to_origego = cosy.Rigid(
+            rotation=Quaternion(np.array(camera_config["vehicle_SE3_camera_"]["rotation"]["coefficients"])).rotation_matrix,
+            translation=np.array(camera_config["vehicle_SE3_camera_"]["translation"])
+        )
+        cam_to_ego = origego_to_ego * cam_to_origego
+        intr = np.asarray([
+            [camera_config["focal_length_x_px_"], camera_config["skew_"], camera_config["focal_center_x_px_"]],
+            [0.0, camera_config["focal_length_y_px_"], camera_config["focal_center_y_px_"]],
+            [0.0, 0.0, 1.0]
+        ], dtype="float64")
+        camera_params[camera_name] = (cam_to_ego, intr)
+
+    # Cameras
+    for camera_name in camera_names:
+        dest_camera_path = os.path.join(dest_scene_path, "camera", camera_name)
+        dest_images_path = os.path.join(dest_camera_path, "images")
+        os.makedirs(dest_images_path)
+        src_images_path = os.path.join(src_scene_path, camera_name)
+        timestamps = []
+        for src_image_file in sorted(os.listdir(src_images_path)):
+            if src_image_file.endswith(".jpg"):
+                timestamp = int(src_image_file.split(".")[0].split("_")[-1]) // (10 ** 3) # us
+                timestamps.append(timestamp)
+                shutil.move(
+                    os.path.join(src_images_path, src_image_file),
+                    os.path.join(dest_images_path, f"{timestamp}.jpg"),
+                )
+        assert len(timestamps) > 0
+
+        timestamps = np.asarray(sorted(timestamps)).astype("uint64")
+        np.savez_compressed(os.path.join(dest_camera_path, f"timestamps.npz"), timestamps=timestamps)
+
+        cam_to_ego = camera_params[camera_name][0]
+
+        # Metadata
+        old_resolution = original_image_shapes[camera_name]
+        new_resolution = list(imageio.imread(os.path.join(dest_images_path, f"{timestamps[0]}.jpg")).shape[:2])
+        metadata = {
+            "filetype": "jpg",
+            "intr": fix_intr(camera_params[camera_name][1], old_resolution, new_resolution).tolist(),
+            "resolution": new_resolution,
+            "timestamps": {
+                "first": int(timestamps[0]),
+                "last": int(timestamps[-1]),
+                "num": int(timestamps.shape[0]),
+                "dt": float(timestamps[-1] - timestamps[0]) / timestamps.shape[0],
+            },
+            "cam_to_ego": {
+                "translation": cam_to_ego.translation.tolist(),
+                "rotation": cam_to_ego.rotation.tolist(),
+            },
+        }
+
+        with open(os.path.join(dest_camera_path, f"config.yaml"), "w") as f:
+            yaml.dump(metadata, f, default_flow_style=False)
+
+    # ego_to_world
+    ego_to_world_timestamps = np.asarray(sorted([int(f.split(".")[0].split("_")[-1]) for f in os.listdir(os.path.join(src_scene_path, "poses"))])).astype("uint64") # ns
+    ego_to_world_transforms = [load_pose(os.path.join(src_scene_path, "poses", f"city_SE3_egovehicle_{ts}.json")) for ts in ego_to_world_timestamps] # origego_to_world
+    ego_to_world_timestamps = ego_to_world_timestamps // (10 ** 3) # us
+    ego_to_world_transforms = [origego_to_world * origego_to_ego.inverse() for origego_to_world in ego_to_world_transforms]
+
+    np.savez_compressed(
+        os.path.join(dest_scene_path, "ego_to_world.npz"),
+        timestamps=ego_to_world_timestamps,
+        transforms=np.asarray([t.to_matrix() for t in ego_to_world_transforms]),
+    )
+
+    # Geopose
+    world_to_utm17n_city = world_to_utm17n[city_name]
+    latlons = []
+    bearings = []
+    for ego_to_world in ego_to_world_transforms:
+        ego_to_world = to2d(ego_to_world)
+        latlons.append(utm17n_to_epsg4326(world_to_utm17n_city(ego_to_world.translation)))
+        bearings.append(math.degrees(utm17n_to_epsg4326.transform_angle(cosy.rotation_matrix_to_angle(world_to_utm17n_city.rotation @ ego_to_world.rotation))))
+    np.savez(os.path.join(dest_scene_path, "geopose.npz"),
+        timestamps=ego_to_world_timestamps,
+        latlons=np.asarray(latlons).astype("float64"),
+        bearings=np.asarray(bearings).astype("float64"),
+    )
+
+    # Lidar
+    dest_lidar_path = os.path.join(dest_scene_path, "lidar", "all")
+    dest_points_path = os.path.join(dest_lidar_path, "points")
+    src_lidar_path = os.path.join(src_scene_path, "lidar")
+    os.makedirs(dest_points_path)
+    lidar_timestamps = []
+    for lidar_file in sorted([os.path.join(src_lidar_path, f) for f in os.listdir(src_lidar_path) if f.endswith(".ply")]):
+        timestamp = int(os.path.basename(lidar_file).split(".")[0].split("_")[-1]) // (10 ** 3)
+        data = pyntcloud.PyntCloud.from_file(lidar_file)
+        points = np.stack((np.array(data.points.x), np.array(data.points.y), np.array(data.points.z)), axis=-1) # In ego space
+        np.savez_compressed(os.path.join(dest_points_path, f"{timestamp}.npz"), points)
+        lidar_timestamps.append(timestamp) # us
+    lidar_timestamps = np.asarray(sorted(lidar_timestamps)).astype("uint64")
+    np.savez_compressed(os.path.join(dest_lidar_path, f"timestamps.npz"), timestamps=lidar_timestamps)
+
+    metadata = {
+        "timestamps": {
+            "first": int(timestamps[0]),
+            "last": int(timestamps[-1]),
+            "num": int(timestamps.shape[0]),
+            "dt": float(timestamps[-1] - timestamps[0]) / timestamps.shape[0],
+        },
+    }
+    with open(os.path.join(dest_lidar_path, f"config.yaml"), "w") as f:
+        yaml.dump(metadata, f, default_flow_style=False)
+
+    # Scene metadata
+    metadata = {
+        "location": city_name,
+        "dataset": "argoverse-v1",
+    }
+    with open(os.path.join(dest_scene_path, f"config.yaml"), "w") as f:
+        yaml.dump(metadata, f, default_flow_style=False)
+
+    shutil.rmtree(src_scene_path)
+
+shutil.rmtree(download_path)
+
+with open(os.path.join(args.path, "LICENSE"), "w") as f:
+    f.write("CC BY-NC-SA 4.0 https://www.argoverse.org/about.html#terms-of-use")

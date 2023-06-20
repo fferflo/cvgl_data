@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+
+import argparse, os, shutil, yaml, cv2, cv2.omnidir, cvgl_data, ciso8601, cosy, math, tqdm, imageio
+import numpy as np
+from functools import partial
+from pyquaternion import Quaternion
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--path", type=str, required=True)
+parser.add_argument("--min-pixels", type=int)
+parser.add_argument("--undistort-focal-length-factor", type=float, default=0.25)
+args = parser.parse_args()
+
+files = [
+    "calibration.zip",
+    "data_poses.zip",
+    "download_2d_perspective.zip",
+    "download_2d_fisheye.zip",
+    "download_3d_velodyne.zip",
+    "data_poses_oxts_extract.zip",
+]
+
+for file in files:
+    if not os.path.isfile(os.path.join(args.path, file)):
+        print("Please download from the KITTI-360 website and place into the folder specified by --path:")
+        print("    Perspective Images for Train & Val")
+        print("    Fisheye Images")
+        print("    Raw Velodyne Scans")
+        print("    Calibrations")
+        print("    Vechicle Poses")
+        print("    OXTS Raw Measurements")
+        sys.exit(-1)
+
+download_path = os.path.join(args.path, "download")
+os.makedirs(download_path)
+for f in files:
+    shutil.move(os.path.join(args.path, f), os.path.join(download_path, f))
+
+for file in files:
+    cvgl_data.prepare.extract(os.path.join(download_path, file), download_path)
+
+cvgl_data.prepare.run(f"cd {download_path} && ./download_3d_velodyne.sh")
+cvgl_data.prepare.run(f"cd {download_path} && ./download_2d_perspective.sh")
+cvgl_data.prepare.run(f"cd {download_path} && ./download_2d_fisheye.sh")
+
+
+path = os.path.join(download_path, "KITTI-360")
+for f in os.listdir(path):
+    shutil.move(os.path.join(path, f), os.path.join(download_path, f))
+
+
+
+def undistort(image, file, intr, intr_new, distortion_parameters, xi):
+    image = cv2.omnidir.undistortImage(image, intr, distortion_parameters, np.asarray(xi), cv2.omnidir.RECTIFY_PERSPECTIVE, Knew=intr_new)
+    return image
+
+camera_params = {}
+for camera in ["image_02", "image_03"]:
+    with open(os.path.join(download_path, "calibration", f"{camera}.yaml")) as f:
+        s = f.read()
+        s = s[s.index("\n") + 1:]
+        config = yaml.safe_load(s)
+    intr = np.asarray([
+        [config["projection_parameters"]["gamma1"], 0, config["projection_parameters"]["u0"]],
+        [0, config["projection_parameters"]["gamma2"], config["projection_parameters"]["v0"]],
+        [0, 0, 1]
+    ], dtype="float32")
+    distortion_parameters = np.asarray([
+        config["distortion_parameters"]["k1"],
+        config["distortion_parameters"]["k2"],
+        config["distortion_parameters"]["p1"],
+        config["distortion_parameters"]["p2"],
+    ], dtype="float32")
+    xi = config["mirror_parameters"]["xi"]
+    intr_new =  np.asarray([
+        [intr[0, 0] * args.undistort_focal_length_factor, 0, intr[0, 2]],
+        [0, intr[1, 1] * args.undistort_focal_length_factor, intr[1, 2]],
+        [0, 0, 1],
+    ])
+    camera_params[camera] = (intr, intr_new, distortion_parameters, xi)
+
+for scene in sorted(os.listdir(os.path.join(download_path, "data_2d_raw"))):
+    scene_path = os.path.join(download_path, "data_2d_raw", scene)
+    for camera in ["image_00", "image_01"]:
+        cvgl_data.prepare.resize(os.path.join(scene_path, camera), (args.min_pixels, args.min_pixels))
+
+    for camera in ["image_02", "image_03"]:
+        intr, intr_new, distortion_parameters, xi = camera_params[camera]
+        cvgl_data.prepare.resize(os.path.join(scene_path, camera), (args.min_pixels, args.min_pixels), preprocess=partial(undistort, intr=intr, intr_new=intr_new, distortion_parameters=distortion_parameters, xi=xi))
+
+
+
+
+
+
+def fix_intr(intr, old_resolution, new_resolution): # TODO: this is used in every dataset script
+    intr = np.copy(intr)
+    intr[:2, :] *= (np.asarray(new_resolution) / np.asarray(old_resolution))[::-1, np.newaxis]
+    return intr
+
+def to2d(frame_to_world): # TODO: this is used in every dataset script
+    return cosy.Rigid(
+        rotation=cosy.angle_to_rotation_matrix(cosy.angle(np.asarray([1.0, 0.0]), (frame_to_world.rotation @ np.asarray([1.0, 0.0, 0.0]))[:2])),
+        translation=frame_to_world.translation[:2],
+    )
+
+def read_timestamps(file):
+    with open(file, "r") as f:
+         timestamps = f.read()
+    timestamps = [t.strip() for t in timestamps.split("\n")]
+    timestamps = [t for t in timestamps if len(t) > 0]
+    # timestamps = [datetime.datetime.strptime(t[:-3], "%Y-%m-%d %H:%M:%S.%f") for t in timestamps]
+    timestamps = [ciso8601.parse_datetime(t).timestamp() for t in timestamps] # Faster version
+    timestamps = np.asarray([int(t * (10 ** 6)) for t in timestamps]).astype("uint64")
+    return timestamps
+
+# Constants
+# See: https://github.com/autonomousvision/kitti360Scripts/blob/master/kitti360scripts/devkits/convertOxtsPose/python/convertOxtsToPose.py#L17
+world_to_epsg3857 = cosy.proj.eastnorthmeters_at_latlon_to_epsg3857(np.asarray([48.9843445, 8.4295857]))
+imu_to_ego =   cosy.Rigid(translation=np.asarray([0.0, 0.0, 0.91])) \
+             * cosy.Rigid(rotation=Quaternion(axis=(1, 0, 0), radians=math.pi).rotation_matrix) # Ego frame where z points upwards, not downwards
+
+
+scenes = []
+
+with open(os.path.join(download_path, "calibration", "calib_cam_to_velo.txt"), "r") as f:
+    lines = f.readlines()
+mat = np.asarray([float(x) for x in lines[0].split(" ")]).reshape(3, 4)
+velo_to_cam00 = cosy.Rigid(rotation=mat[:3, :3], translation=mat[:3, 3]).inverse()
+
+with open(os.path.join(download_path, "calibration", "calib_cam_to_pose.txt"), "r") as f:
+    lines = f.readlines()
+cam_to_imu = {}
+for line in lines:
+    line = line.split(":")
+    mat = np.asarray([float(x) for x in line[1].strip().split(" ")]).reshape(3, 4)
+    cam_to_imu[line[0].strip()] = cosy.Rigid(rotation=mat[:3, :3], translation=mat[:3, 3])
+velo_to_imu = cam_to_imu["image_00"] * velo_to_cam00
+
+with open(os.path.join(download_path, "calibration", "perspective.txt"), "r") as f:
+    lines = f.readlines()
+intrinsics = {}
+for line in [l for l in lines if l.startswith("P_rect_")]:
+    line = line.split(":")
+    intrinsics[line[0][7:]] = np.asarray([float(x) for x in line[1].strip().split(" ")]).reshape(3, 4)[:3, :3]
+original_image_shapes = {}
+for line in [l for l in lines if l.startswith("S_rect_")]:
+    line = line.split(":")
+    original_image_shapes[line[0][7:]] = np.flip(np.asarray([float(x) for x in line[1].strip().split(" ")]).astype("int"), axis=0)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+for scene_name in tqdm.tqdm([f for f in os.listdir(os.path.join(download_path, "data_2d_raw")) if f.startswith("2013_05_28_drive_")], desc="Kitti360"):
+    dest_scene_path = os.path.join(args.path, scene_name)
+    if not os.path.isdir(dest_scene_path):
+        os.makedirs(dest_scene_path)
+
+    # ego_to_world
+    with open(os.path.join(download_path, scene_name, "poses.txt"), "r") as f:
+        poses = f.read()
+    poses = [p.strip() for p in poses.split("\n")]
+    poses = [p for p in poses if len(p) > 0]
+    def parse(str):
+        tokens = str.split(" ")
+        frame_index = int(tokens[0])
+        m = np.asarray([float(x) for x in tokens[1:]]).reshape(3, 4)
+        imu_to_world = cosy.Rigid(
+            rotation=m[:, :3],
+            translation=m[:, 3],
+        )
+
+        return (imu_to_world, frame_index)
+    poses = [parse(p) for p in poses]
+    cam0_timestamps = read_timestamps(os.path.join(download_path, "data_2d_raw", scene_name, "image_00", "timestamps.txt")) # Timestamps of poses are not specified, we take the ones of image_00 instead
+    ego_to_world_timestamps = np.asarray([cam0_timestamps[i] for _, i in poses]).astype("uint64")
+    ego_to_world_transforms = [t * imu_to_ego.inverse() for t, _ in poses]
+
+    np.savez_compressed(
+        os.path.join(dest_scene_path, "ego_to_world.npz"),
+        timestamps=ego_to_world_timestamps,
+        transforms=np.asarray([t.to_matrix() for t in ego_to_world_transforms]),
+    )
+
+    # Geopose
+    latlons = []
+    bearings = []
+    for ego_to_world in ego_to_world_transforms:
+        ego_to_world = to2d(ego_to_world)
+        latlons.append(cosy.proj.epsg3857_to_epsg4326(world_to_epsg3857(ego_to_world.translation)))
+        bearings.append(math.degrees(cosy.proj.epsg3857_to_epsg4326.transform_angle(cosy.rotation_matrix_to_angle(world_to_epsg3857.rotation @ ego_to_world.rotation))))
+    np.savez(os.path.join(dest_scene_path, "geopose.npz"),
+        timestamps=ego_to_world_timestamps,
+        latlons=np.asarray(latlons).astype("float64"),
+        bearings=np.asarray(bearings).astype("float64"),
+    )
+
+    # IMU measurements
+    oxts_path = os.path.join(download_path, scene_name.replace("sync", "extract"), "oxts", "data")
+    oxts = []
+    for file in sorted(os.listdir(oxts_path)):
+        with open(os.path.join(oxts_path, file), "r") as f:
+            oxts.append(f.read())
+    oxts = [x.strip() for x in oxts]
+    oxts = [x for x in oxts if len(x) > 0]
+    oxts = np.asarray([[float(l) for l in x.split(" ")] for x in oxts])
+    oxts_timestamps = read_timestamps(os.path.join(os.path.dirname(oxts_path), "timestamps.txt"))
+    assert len(oxts) == len(oxts_timestamps)
+
+    linear_acceleration = np.asarray([o[14:17] for o in oxts])
+    angular_velocity = np.asarray([o[20:23] for o in oxts])
+    velocity = np.asarray([o[8:11] for o in oxts])
+
+    dest_odometry_path = os.path.join(dest_scene_path, "odometry")
+    if not os.path.isdir(dest_odometry_path):
+        os.makedirs(dest_odometry_path)
+    np.savez_compressed(
+        os.path.join(dest_odometry_path, "linear_velocity.npz"),
+        timestamps=oxts_timestamps,
+        values=velocity,
+    )
+    np.savez_compressed(
+        os.path.join(dest_odometry_path, "angular_velocity.npz"),
+        timestamps=oxts_timestamps,
+        values=angular_velocity,
+    )
+    np.savez_compressed(
+        os.path.join(dest_odometry_path, "linear_acceleration.npz"),
+        timestamps=oxts_timestamps,
+        values=linear_acceleration,
+    )
+
+
+    # Cameras
+    camera_params2 = []
+    for c in ["00", "01"]:
+        camera_params2.append((
+            f"image_{c}",
+            intrinsics[c],
+            original_image_shapes[c],
+        ))
+    for camera_name in ["image_02", "image_03"]:
+        intr = camera_params[camera_name][1]
+        with open(os.path.join(download_path, "calibration", f"{camera_name}.yaml")) as f:
+            s = f.read()
+            s = s[s.index("\n") + 1:]
+            config = yaml.safe_load(s)
+        original_image_shape = np.asarray([config["image_height"], config["image_width"]])
+
+        camera_params2.append((
+            camera_name,
+            intr,
+            original_image_shape,
+        ))
+
+    for camera_name, intr, original_image_shape in camera_params2:
+        dest_camera_path = os.path.join(dest_scene_path, "camera", camera_name)
+        dest_images_path = os.path.join(dest_camera_path, "images")
+        if not os.path.isdir(dest_images_path):
+            os.makedirs(dest_images_path)
+
+        src_camera_path = os.path.join(download_path, "data_2d_raw", scene_name, camera_name)
+        src_image_path = os.path.join(src_camera_path, "data_rect" if camera_name in ["image_00", "image_01"] else "data_rgb")
+        image_timestamps = read_timestamps(os.path.join(src_camera_path, "timestamps.txt"))
+
+        new_image_timestamps = []
+        for image_file in sorted(os.listdir(src_image_path)):
+            if image_file.endswith(".jpg"):
+                frame_index = int(image_file[:-4])
+                shutil.copy(
+                    os.path.join(src_image_path, image_file),
+                    os.path.join(dest_images_path, f"{image_timestamps[frame_index]}.jpg"),
+                )
+                new_image_timestamps.append(image_timestamps[frame_index])
+        image_timestamps = np.asarray(sorted(new_image_timestamps))
+
+        np.savez_compressed(os.path.join(dest_camera_path, f"timestamps.npz"), timestamps=image_timestamps)
+
+        cam_to_ego = imu_to_ego * cam_to_imu[camera_name]
+
+        old_resolution = original_image_shape
+        new_resolution = list(imageio.imread(os.path.join(dest_images_path, f"{image_timestamps[0]}.jpg")).shape[:2])
+        metadata = {
+            "filetype": "jpg",
+            "intr": fix_intr(intr, old_resolution, new_resolution).tolist(),
+            "resolution": new_resolution,
+            "timestamps": {
+                "first": int(image_timestamps[0]),
+                "last": int(image_timestamps[-1]),
+                "num": int(image_timestamps.shape[0]),
+                "dt": float(image_timestamps[-1] - image_timestamps[0]) / image_timestamps.shape[0],
+            },
+            "cam_to_ego": {
+                "translation": cam_to_ego.translation.tolist(),
+                "rotation": cam_to_ego.rotation.tolist(),
+            },
+        }
+
+        with open(os.path.join(dest_camera_path, f"config.yaml"), "w") as f:
+            yaml.dump(metadata, f, default_flow_style=False)
+
+    # Lidar
+    src_lidar_path = os.path.join(download_path, "data_3d_raw", scene_name, "velodyne_points")
+    lidar_timestamps = read_timestamps(os.path.join(src_lidar_path, "timestamps.txt"))
+    dest_lidar_path = os.path.join(dest_scene_path, "lidar", "all")
+    dest_points_path = os.path.join(dest_lidar_path, "points")
+    os.makedirs(dest_points_path)
+    velo_to_ego = imu_to_ego * velo_to_imu
+    for lidar_file in os.listdir(os.path.join(src_lidar_path, "data")):
+        assert lidar_file.endswith(".bin")
+        frame_index = int(lidar_file[:-4])
+        points = np.fromfile(os.path.join(src_lidar_path, "data", lidar_file), dtype=np.float32)
+        points = points.reshape((-1, 4))[:, :3]
+        points = velo_to_ego(points)
+        np.savez_compressed(os.path.join(dest_points_path, f"{lidar_timestamps[frame_index]}.npz"), points)
+    np.savez_compressed(os.path.join(dest_lidar_path, f"timestamps.npz"), timestamps=lidar_timestamps)
+
+    metadata = {
+        "timestamps": {
+            "first": int(lidar_timestamps[0]),
+            "last": int(lidar_timestamps[-1]),
+            "num": int(lidar_timestamps.shape[0]),
+            "dt": float(lidar_timestamps[-1] - lidar_timestamps[0]) / lidar_timestamps.shape[0],
+        },
+    }
+    with open(os.path.join(dest_lidar_path, f"config.yaml"), "w") as f:
+        yaml.dump(metadata, f, default_flow_style=False)
+
+    # Scene metadata
+    metadata = {
+        "location": "karlsruhe",
+        "dataset": "kitti360",
+    }
+    with open(os.path.join(dest_scene_path, f"config.yaml"), "w") as f:
+        yaml.dump(metadata, f, default_flow_style=False)
+
+shutil.rmtree(download_path)
+
+with open(os.path.join(args.path, "LICENSE"), "w") as f:
+    f.write("CC BY-NC-SA 3.0 https://www.cvlibs.net/datasets/kitti-360")

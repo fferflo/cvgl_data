@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+
+import argparse, os, shutil, cvgl_data, sys, cosy, tqdm, yaml, math, cvgl_data, imageio
+from nuscenes.nuscenes import NuScenes
+from pyquaternion import Quaternion
+import numpy as np
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--path", type=str, required=True)
+parser.add_argument("--min-pixels", type=int, default=-1)
+args = parser.parse_args()
+
+files = [
+    "can_bus.zip",
+    "v1.0-test_blobs.tgz",
+    "v1.0-test_meta.tgz",
+    "v1.0-trainval01_blobs.tgz",
+    "v1.0-trainval02_blobs.tgz",
+    "v1.0-trainval03_blobs.tgz",
+    "v1.0-trainval04_blobs.tgz",
+    "v1.0-trainval05_blobs.tgz",
+    "v1.0-trainval06_blobs.tgz",
+    "v1.0-trainval07_blobs.tgz",
+    "v1.0-trainval08_blobs.tgz",
+    "v1.0-trainval09_blobs.tgz",
+    "v1.0-trainval10_blobs.tgz",
+    "v1.0-trainval_meta.tgz",
+]
+
+missing_files = [file for file in files if not os.path.exists(os.path.join(args.path, file))]
+if len(missing_files) > 0:
+    print("Please download the nuscenes dataset and place into the folder specified by --path. Missing files: " + ", ".join(missing_files))
+    sys.exit(-1)
+
+download_path = os.path.join(args.path, "download")
+os.makedirs(download_path)
+for f in files:
+    shutil.move(os.path.join(args.path, f), os.path.join(download_path, f))
+
+for file in files:
+    cvgl_data.prepare.extract(os.path.join(download_path, file), download_path)
+
+if args.min_pixels > 0:
+    cvgl_data.prepare.resize(os.path.join(download_path, "sweeps"), (args.min_pixels, args.min_pixels))
+    cvgl_data.prepare.resize(os.path.join(download_path, "samples"), (args.min_pixels, args.min_pixels))
+
+
+# Constants
+# See: https://github.com/nutonomy/nuscenes-devkit/blob/master/python-sdk/nuscenes/scripts/export_poses.py
+world_origins_latlon = {
+    "boston-seaport": [42.336849169438615, -71.05785369873047],
+    "singapore-onenorth": [1.2882100868743724, 103.78475189208984],
+    "singapore-hollandvillage": [1.2993652317780957, 103.78217697143555],
+    "singapore-queenstown": [1.2782562240223188, 103.76741409301758],
+}
+world_to_epsg3857 = {location: cosy.proj.eastnorthmeters_at_latlon_to_epsg3857(origin) for location, origin in world_origins_latlon.items()}
+camera_names = ["CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT", "CAM_FRONT", "CAM_FRONT_LEFT", "CAM_FRONT_RIGHT"]
+epsg3857_to_epsg4326 = cosy.proj.Transformer("epsg:3857", "epsg:4326")
+origego_to_ego = cosy.Rigid(
+    translation=np.asarray([0.0, 0.0, -0.01])
+)
+
+
+
+
+
+def rec_to_transform(rec):
+    return cosy.Rigid(rotation=Quaternion(rec["rotation"]).rotation_matrix, translation=rec["translation"])
+
+def fix_intr(intr, old_resolution, new_resolution): # TODO: this is used in every dataset script
+    intr = np.copy(intr)
+    intr[:2, :] *= (np.asarray(new_resolution) / np.asarray(old_resolution))[::-1, np.newaxis]
+    return intr
+
+def to2d(frame_to_world): # TODO: this is used in every dataset script
+    return cosy.Rigid(
+        rotation=cosy.angle_to_rotation_matrix(cosy.angle(np.asarray([1.0, 0.0]), (frame_to_world.rotation @ np.asarray([1.0, 0.0, 0.0]))[:2])),
+        translation=frame_to_world.translation[:2],
+    )
+
+
+train = NuScenes(version="v1.0-trainval", dataroot=download_path, verbose=True)
+test = NuScenes(version="v1.0-test", dataroot=download_path, verbose=True)
+
+jobs = []
+for split_dataset in [train, test]:
+    for dataset_scene in sorted(split_dataset.scene, key=lambda dataset_scene: dataset_scene["name"]):
+        jobs.append((split_dataset, dataset_scene))
+
+for split_dataset, dataset_scene in tqdm.tqdm(jobs, desc="Scenes"):
+    recs = [split_dataset.get("sample", dataset_scene["first_sample_token"])]
+    while recs[-1]["next"] != "":
+        recs.append(split_dataset.get("sample", recs[-1]["next"]))
+    assert len(recs) > 0
+
+    scene_name = dataset_scene["name"]
+    dest_scene_path = os.path.join(args.path, scene_name)
+    location = split_dataset.get("log", dataset_scene["log_token"])["location"]
+
+    dest_lidar_path = os.path.join(dest_scene_path, "lidar", "all")
+    dest_points_path = os.path.join(dest_lidar_path, "points")
+    os.makedirs(dest_points_path)
+
+    cameras = {}
+    lidar_timestamps = []
+    ego_to_world = []
+    for index_in_scene, rec in enumerate(recs):
+        lidar_rec = split_dataset.get("sample_data", rec["data"]["LIDAR_TOP"])
+        lidar_timestamp = int(lidar_rec["timestamp"]) # us
+        lidar_timestamps.append(lidar_timestamp)
+
+        origego_to_world = rec_to_transform(split_dataset.get("ego_pose", lidar_rec["ego_pose_token"]))
+        ego_to_world.append((lidar_timestamp, origego_to_world * origego_to_ego.inverse()))
+
+        lidar_to_origego = rec_to_transform(split_dataset.get("calibrated_sensor", lidar_rec["calibrated_sensor_token"]))
+        lidar_to_ego = origego_to_ego * lidar_to_origego
+        lidar_file = os.path.join(split_dataset.dataroot, lidar_rec["filename"])
+        scan = np.fromfile(lidar_file, dtype=np.float32)
+        scan = scan[:scan.shape[0] // 5 * 5]
+        points = scan.reshape((-1, 5))[:, :3]
+        points = lidar_to_ego(points)
+
+        np.savez_compressed(os.path.join(dest_points_path, f"{lidar_timestamp}.npz"), points)
+
+
+        for camera_name in camera_names:
+            camera_rec = split_dataset.get("sample_data", rec["data"][camera_name])
+            original_image_shape = np.asarray([camera_rec["height"], camera_rec["width"]])
+            camera_timestamp = camera_rec["timestamp"]
+
+            camera_image_path = os.path.join(split_dataset.dataroot, camera_rec["filename"])
+            assert camera_image_path.endswith(".jpg")
+
+            camera_pose_rec = split_dataset.get("calibrated_sensor", camera_rec["calibrated_sensor_token"])
+            cam_to_origego = rec_to_transform(camera_pose_rec)
+
+            intr = np.array(camera_pose_rec["camera_intrinsic"])
+            cam_to_ego = origego_to_ego * cam_to_origego
+
+            if not camera_name in cameras:
+                cameras[camera_name] = (intr, original_image_shape, {})
+
+            cameras[camera_name][2][camera_timestamp] = (camera_image_path, cam_to_ego)
+
+    # Lidar
+    lidar_timestamps = np.asarray(sorted(lidar_timestamps)).astype("uint64")
+    np.savez_compressed(os.path.join(dest_lidar_path, f"timestamps.npz"), timestamps=lidar_timestamps)
+    metadata = {
+        "timestamps": {
+            "first": int(lidar_timestamps[0]),
+            "last": int(lidar_timestamps[-1]),
+            "num": int(lidar_timestamps.shape[0]),
+            "dt": float(lidar_timestamps[-1] - lidar_timestamps[0]) / lidar_timestamps.shape[0],
+        },
+    }
+    with open(os.path.join(dest_lidar_path, f"config.yaml"), "w") as f:
+        yaml.dump(metadata, f, default_flow_style=False)
+
+    # ego_to_world
+    ego_to_world = sorted(ego_to_world)
+    ego_to_world_timestamps = np.asarray([t[0] for t in ego_to_world]).astype("uint64")
+    ego_to_world_transforms = [t[1] for t in ego_to_world]
+    np.savez_compressed(
+        os.path.join(dest_scene_path, "ego_to_world.npz"),
+        timestamps=ego_to_world_timestamps,
+        transforms=np.asarray([t.to_matrix() for t in ego_to_world_transforms]),
+    )
+
+    # Geopose
+    latlons = []
+    bearings = []
+    for ego_to_world in ego_to_world_transforms:
+        ego_to_world = to2d(ego_to_world)
+        latlons.append(epsg3857_to_epsg4326(world_to_epsg3857[location](ego_to_world.translation)))
+        bearings.append(math.degrees(epsg3857_to_epsg4326.transform_angle(cosy.rotation_matrix_to_angle(world_to_epsg3857[location].rotation @ ego_to_world.rotation))))
+    np.savez(os.path.join(dest_scene_path, "geopose.npz"),
+        timestamps=ego_to_world_timestamps,
+        latlons=np.asarray(latlons).astype("float64"),
+        bearings=np.asarray(bearings).astype("float64"),
+    )
+
+    # Camera
+    for camera_name, (intr, original_image_shape, frame_data) in cameras.items():
+        dest_camera_path = os.path.join(dest_scene_path, "camera", camera_name)
+        dest_images_path = os.path.join(dest_camera_path, "images")
+        os.makedirs(dest_images_path)
+
+        camera_timestamps = np.asarray(sorted(frame_data.keys())).astype("uint64")
+        np.savez_compressed(os.path.join(dest_camera_path, f"timestamps.npz"), timestamps=camera_timestamps)
+
+        for camera_timestamp, (camera_image_path, _) in frame_data.items():
+            shutil.move(
+                camera_image_path,
+                os.path.join(dest_images_path, f"{int(camera_timestamp)}.jpg"),
+            )
+
+        cam_to_ego = [frame_data[t][1] for t in camera_timestamps]
+        np.savez_compressed(
+            os.path.join(dest_camera_path, "cam_to_ego.npz"),
+            timestamps=camera_timestamps,
+            transforms=np.asarray([t.to_matrix() for t in cam_to_ego]),
+        )
+
+        # Metadata
+        old_resolution = original_image_shape
+        new_resolution = list(imageio.imread(os.path.join(dest_images_path, f"{camera_timestamps[0]}.jpg")).shape[:2])
+        metadata = {
+            "filetype": "jpg",
+            "intr": fix_intr(intr, old_resolution, new_resolution).tolist(),
+            "resolution": new_resolution,
+            "timestamps": {
+                "first": int(camera_timestamps[0]),
+                "last": int(camera_timestamps[-1]),
+                "num": int(camera_timestamps.shape[0]),
+                "dt": float(camera_timestamps[-1] - camera_timestamps[0]) / camera_timestamps.shape[0],
+            },
+        }
+
+        with open(os.path.join(dest_camera_path, f"config.yaml"), "w") as f:
+            yaml.dump(metadata, f, default_flow_style=False)
+
+    # Scene metadata
+    metadata = {
+        "location": location,
+        "dataset": "nuscenes",
+    }
+    with open(os.path.join(dest_scene_path, f"config.yaml"), "w") as f:
+        yaml.dump(metadata, f, default_flow_style=False)
+
+shutil.rmtree(download_path)
+
+with open(os.path.join(args.path, "LICENSE"), "w") as f:
+    f.write("CC BY-NC-SA 4.0 with additional terms https://www.nuscenes.org/terms-of-use")

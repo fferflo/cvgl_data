@@ -1,0 +1,12 @@
+<launch>
+  <arg name="color"/>
+  <arg name="output_path"/>
+  <arg name="queue_size"/>
+
+  <node pkg="velodyne_pointcloud" type="cloud_node" name="convert_$(arg color)" output="screen" args="_calibration:=$(find velodyne_pointcloud)/params/32db.yaml _model:=32E _minrange:=0 _maxrange:=999999 _queue_size:=$(arg queue_size)">
+    <remap from="/velodyne_packets" to="/lidar_$(arg color)_scan"/>
+    <remap from="/velodyne_points" to="/lidar_$(arg color)_scan/points"/>
+  </node>
+
+  <node pkg="pcl_ros" type="pointcloud_to_pcd" name="save_$(arg color)" output="screen" args="input:=/lidar_$(arg color)_scan/points _prefix:=$(arg output_path)/lidar/$(arg color)/ _queue_size:=$(arg queue_size)"/>
+</launch>

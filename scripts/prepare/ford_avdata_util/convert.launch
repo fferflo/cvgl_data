@@ -1,0 +1,30 @@
+<launch>
+  <arg name="bag"/>
+  <arg name="output_path"/>
+  <arg name="delay" default="5.0"/>
+  <arg name="rate" default="1.0"/>
+  <arg name="queue_size" default="99999999"/>
+
+  <node pkg="rosbag" type="play" name="player" output="screen" args="$(arg bag) --delay $(arg delay) --rate $(arg rate) --queue $(arg queue_size) --wait-for-subscribers --topics /lidar_red_scan /lidar_blue_scan /lidar_green_scan /lidar_yellow_scan"/>
+
+  <include file="/ford-avdata-code/convert_and_save_color.launch">
+    <arg name="color" value="red"/>
+    <arg name="output_path" value="$(arg output_path)"/>
+    <arg name="queue_size" value="$(arg queue_size)"/>
+  </include>
+  <include file="/ford-avdata-code/convert_and_save_color.launch">
+    <arg name="color" value="blue"/>
+    <arg name="output_path" value="$(arg output_path)"/>
+    <arg name="queue_size" value="$(arg queue_size)"/>
+  </include>
+  <include file="/ford-avdata-code/convert_and_save_color.launch">
+    <arg name="color" value="green"/>
+    <arg name="output_path" value="$(arg output_path)"/>
+    <arg name="queue_size" value="$(arg queue_size)"/>
+  </include>
+  <include file="/ford-avdata-code/convert_and_save_color.launch">
+    <arg name="color" value="yellow"/>
+    <arg name="output_path" value="$(arg output_path)"/>
+    <arg name="queue_size" value="$(arg queue_size)"/>
+  </include>
+</launch>
