@@ -69,7 +69,7 @@ else:
 stream = frame_ids
 
 # Convert frame
-@lambda f: (lambda x: f(*x))
+@cvgl_data.unwrap
 def load(scene, timestamp):
     ground_frame = scene.load(timestamp) #.move_ego(cosy.Rigid(translation=[10.0, 0.0, 0.0], rotation=Quaternion(axis=(-0.3, 1.2, 0.4), radians=2.0).rotation_matrix))
     latlon, bearing = ground_frame.geopose.latlon, ground_frame.geopose.bearing
@@ -93,7 +93,7 @@ def load(scene, timestamp):
 stream = pl.map(load, stream, workers=12, maxsize=12)
 
 # Convert frame
-@lambda f: (lambda x: f(*x))
+@cvgl_data.unwrap
 def save(name, camera_names, aerial_image, ground_images):
     if not args.no_aerial:
         imageio.imwrite(os.path.join(log.dir(), f"{name}-aerial.jpg"), aerial_image.astype("uint8"))

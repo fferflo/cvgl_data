@@ -65,3 +65,6 @@ def get_all_timestamps(node):
         assert isinstance(node, cvgl_data.Loader)
         timestamps.append(node.timestamps)
     return timestamps
+
+def unwrap(func):
+    return lambda args: func(*args)

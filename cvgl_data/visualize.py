@@ -59,7 +59,7 @@ def draw_trajectories(latlons, tile_loader, zoom, bearings=None, colors=None, ti
         raise ValueError("Must pass at least one scene")
 
     stream = [(scene_index, frame_index) for scene_index in range(len(latlons)) for frame_index in range(len(latlons[scene_index]))]
-    @lambda f: (lambda x: f(*x))
+    @cvgl_data.unwrap
     def load(scene_index, frame_index):
         latlon = latlons[scene_index][frame_index]
 

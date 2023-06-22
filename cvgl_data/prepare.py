@@ -120,7 +120,7 @@ def resize(path, min_size, skip=lambda n: False, preprocess=None, load=imageio.i
     stream = pl.thread.flat_map(load2, stream, workers=4, maxsize=4)
 
     # Convert frame
-    @lambda f: (lambda x: f(*x))
+    @cvgl_data.unwrap
     def convert(image, file):
         if not preprocess is None:
             image = preprocess(image, file)
@@ -138,7 +138,7 @@ def resize(path, min_size, skip=lambda n: False, preprocess=None, load=imageio.i
     stream = pl.thread.map(convert, stream, workers=12, maxsize=12)
 
     # Save frame
-    @lambda f: (lambda x: f(*x))
+    @cvgl_data.unwrap
     def save(image, file_oldext):
         file_jpg = ".".join(file_oldext.split(".")[:-1]) + ".jpg"
         tempfile_jpg = to_tempfile(file_jpg)
