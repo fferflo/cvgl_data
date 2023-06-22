@@ -4,7 +4,7 @@ from setuptools import setup
 
 setup(
     name="cvgl_data",
-    version="0.1.0",
+    version="0.1.1",
     description="A library for managing datasets for cross-view geolocalization (CVGL).",
     author="Florian Fervers",
     author_email="florian.fervers@gmail.com",
