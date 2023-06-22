@@ -11,7 +11,7 @@ parser.add_argument("--min-pixels", type=int, default=-1)
 args = parser.parse_args()
 
 if shutil.which("s5cmd") is None:
-    print("Please install s5cmd. See https://github.com/argoverse/av2-api/blob/main/DOWNLOAD.md")
+    print("Please install s5cmd. See https://argoverse.github.io/user-guide/getting_started.html#downloading-the-data")
     sys.exit(-1)
 
 download_path = os.path.join(args.path, "download")
@@ -19,12 +19,12 @@ download_path = os.path.join(args.path, "download")
 sensor_dataset_path = os.path.join(download_path, "sensor-dataset")
 if not os.path.isdir(sensor_dataset_path):
     os.makedirs(sensor_dataset_path)
-cvgl_data.prepare.run(f"s5cmd --no-sign-request -numworkers 16 cp s3://argoai-argoverse/av2/sensor/* {sensor_dataset_path}")
+cvgl_data.prepare.run(f"s5cmd --no-sign-request -numworkers 16 cp s3://argoverse/datasets/av2/sensor/* {sensor_dataset_path}")
 
 mapchange_dataset_path = os.path.join(download_path, "mapchange-dataset")
 if not os.path.isdir(mapchange_dataset_path):
     os.makedirs(mapchange_dataset_path)
-cvgl_data.prepare.run(f"s5cmd --no-sign-request -numworkers 16 cp s3://argoai-argoverse/av2/tars/tbv/*.tar.gz {mapchange_dataset_path}")
+cvgl_data.prepare.run(f"s5cmd --no-sign-request -numworkers 16 cp s3://argoverse/datasets/av2/tbv/* {mapchange_dataset_path}")
 for f in [os.path.join(mapchange_dataset_path, f) for f in os.listdir(mapchange_dataset_path) if f.endswith(".tar.gz")]:
     cvgl_data.prepare.run(f"tar -xvzf {f} --directory {mapchange_dataset_path}")
     os.remove(f)
