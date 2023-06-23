@@ -12,7 +12,7 @@
 
 #### Installation
 ```
-COMING SOON: pip install cvgl_data
+pip install cvgl_data
 ```
 
 #### Content
