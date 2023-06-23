@@ -23,8 +23,9 @@ pip install cvgl_data
     4. [Visualization](#visualization)
 2. [Pseudo-labelled ground-truth](#straight_ruler-ground-truth)
 3. [Dataset format](#file_folder-format)
-4. [Example: Integration with PyTorch](#example-integration-with-pytorch)
-5. [Notes](#notes)
+4. [Build from source](#build-from-source)
+5. [Example: Integration with PyTorch](#example-integration-with-pytorch)
+6. [Notes](#notes)
 
 #### Paper
 If you find this library useful for your research, please consider citing:
@@ -266,6 +267,22 @@ When `updates` is passed, the function will first check all provided paths when 
 ```
 
 The format uses npz files for numerical data, yaml files for configuration data and allows for common image file-types.
+
+## Build from source
+
+We include a docker script that pulls all necessary dependencies and builds [manylinux](https://github.com/pypa/manylinux) wheels for this library.
+
+##### 1. Install docker
+
+[Follow these instructions](https://docs.docker.com/engine/install/)
+
+##### 2. Build wheels
+
+Run `sh build_wheel/build_all.sh ./wheels` to build wheels for different python versions and store them in `./wheels`.
+
+##### 3. Install via pip
+
+`pip install --find-links ./wheels cvgl_data`
 
 ## Example: Integration with PyTorch
 

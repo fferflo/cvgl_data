@@ -24,8 +24,8 @@ git clone https://github.com/fferflo/cosy && cd cosy && cmake -DPython_ROOT_DIR=
 git clone https://github.com/fferflo/tiledwebmaps && cd tiledwebmaps && mkdir build && cd build && cmake -DPython_ROOT_DIR=$BUILD_PYTHON_ROOT_PATH .. && make -j32 && make install -j32 && cd ../.. && rm -rf tiledwebmaps
 
 
-git clone https://github.com/fferflo/cvgl_data
-cd cvgl_data && mkdir build && cd build
+cp -r /cvgl_data /cvgl_data2
+cd /cvgl_data2 && mkdir build && cd build
 cmake -DPython_ROOT_DIR=$BUILD_PYTHON_ROOT_PATH ..
 make -j32
 
