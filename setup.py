@@ -27,7 +27,6 @@ setup(
         "opencv-contrib-python",
         "pandas",
         "pyyaml",
-        "lyft-dataset-sdk",
         "nuscenes-devkit",
         "ciso8601",
         "pyunpack",
