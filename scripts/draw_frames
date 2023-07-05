@@ -71,7 +71,7 @@ stream = frame_ids
 # Convert frame
 @cvgl_data.unwrap
 def load(scene, timestamp):
-    ground_frame = scene.load(timestamp) #.move_ego(cosy.Rigid(translation=[10.0, 0.0, 0.0], rotation=Quaternion(axis=(-0.3, 1.2, 0.4), radians=2.0).rotation_matrix))
+    ground_frame = scene.load(timestamp) #.move_ego(scene, cosy.Rigid(translation=[10.0, 0.0, 0.0], rotation=Quaternion(axis=(-0.3, 1.2, 0.4), radians=2.0).rotation_matrix))
     latlon, bearing = ground_frame.geopose.latlon, ground_frame.geopose.bearing
     # latlon = cosy.geo.move_from_latlon(ground_frame.geopose.latlon, 90, 25.0)
     # bearing = ground_frame.geopose.bearing + 45.0

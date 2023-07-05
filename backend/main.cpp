@@ -1,3 +1,5 @@
+#define PYBIND11_DETAILED_ERROR_MESSAGES
+
 #include <xtensor-python/pytensor.hpp>
 #include <pybind11/pybind11.h>
 #include <cosy/python.h>
@@ -41,6 +43,9 @@ PYBIND11_MODULE(backend, m)
     .def("__repr__", [](cvgl_data::NamedData& self){
       return self.to_string();
     })
+    .def("__len__", [](cvgl_data::NamedData& self){
+      return self.get_all().size();
+    })
     .def("__getitem__", &cvgl_data::NamedData::get)
     .def("__contains__", [](cvgl_data::NamedData& self, std::string name){
       return self.get_all().find(name) != self.get_all().end();
@@ -61,10 +66,21 @@ PYBIND11_MODULE(backend, m)
       }
       return result;
     })
+    .def(py::pickle(
+        [](const cvgl_data::NamedData& obj) {
+          return obj.pickle();
+        },
+        [](py::tuple t) {
+          return cvgl_data::NamedData::unpickle(t);
+        }
+    ))
   ;
   py::class_<cvgl_data::NamedDataLoader, std::shared_ptr<cvgl_data::NamedDataLoader>, cvgl_data::Loader>(m, "NamedDataLoader", py::dynamic_attr())
     .def("__repr__", [](cvgl_data::NamedDataLoader& self){
       return self.to_string();
+    })
+    .def("__len__", [](cvgl_data::NamedDataLoader& self){
+      return self.get_loaders().size();
     })
     .def("__getitem__", &cvgl_data::NamedDataLoader::get)
     .def("load", [](cvgl_data::NamedDataLoader& self, uint64_t timestamp){
@@ -95,6 +111,14 @@ PYBIND11_MODULE(backend, m)
       return self.to_string();
     })
     .def_property_readonly("transform", &cvgl_data::EgoToWorld::get_transform)
+    .def(py::pickle(
+        [](const cvgl_data::EgoToWorld& obj) {
+          return obj.pickle();
+        },
+        [](py::tuple t) {
+          return cvgl_data::EgoToWorld::unpickle(t);
+        }
+    ))
   ;
   py::class_<cvgl_data::EgoToWorldLoader, std::shared_ptr<cvgl_data::EgoToWorldLoader>, cvgl_data::Loader>(m, "EgoToWorldLoader", py::dynamic_attr())
     .def("__repr__", [](cvgl_data::EgoToWorldLoader& self){
@@ -113,6 +137,14 @@ PYBIND11_MODULE(backend, m)
     })
     .def_property_readonly("latlon", &cvgl_data::GeoPose::get_latlon)
     .def_property_readonly("bearing", &cvgl_data::GeoPose::get_bearing)
+    .def(py::pickle(
+        [](const cvgl_data::GeoPose& obj) {
+          return obj.pickle();
+        },
+        [](py::tuple t) {
+          return cvgl_data::GeoPose::unpickle(t);
+        }
+    ))
   ;
   py::class_<cvgl_data::GeoPoseLoader, std::shared_ptr<cvgl_data::GeoPoseLoader>, cvgl_data::Loader>(m, "GeoPoseLoader", py::dynamic_attr())
     .def("__repr__", [](cvgl_data::GeoPoseLoader& self){
@@ -130,6 +162,14 @@ PYBIND11_MODULE(backend, m)
       return self.to_string();
     })
     .def_property_readonly("score", &cvgl_data::OutlierScore::get_score)
+    .def(py::pickle(
+        [](const cvgl_data::OutlierScore& obj) {
+          return obj.pickle();
+        },
+        [](py::tuple t) {
+          return cvgl_data::OutlierScore::unpickle(t);
+        }
+    ))
   ;
   py::class_<cvgl_data::OutlierScoreLoader, std::shared_ptr<cvgl_data::OutlierScoreLoader>, cvgl_data::Loader>(m, "OutlierScoreLoader", py::dynamic_attr())
     .def("__repr__", [](cvgl_data::OutlierScoreLoader& self){
@@ -250,6 +290,14 @@ PYBIND11_MODULE(backend, m)
     .def_property_readonly("cam_to_ego", &cvgl_data::Camera::get_cam_to_ego)
     .def_property_readonly("intr", &cvgl_data::Camera::get_projection)
     .def_property_readonly("name", &cvgl_data::Camera::get_name)
+    .def(py::pickle(
+        [](const cvgl_data::Camera& obj) {
+          return obj.pickle();
+        },
+        [](py::tuple t) {
+          return cvgl_data::Camera::unpickle(t);
+        }
+    ))
   ;
   py::class_<cvgl_data::CameraLoader, std::shared_ptr<cvgl_data::CameraLoader>, cvgl_data::Loader>(m, "CameraLoader", py::dynamic_attr())
     .def("__repr__", [](cvgl_data::CameraLoader& self){
@@ -292,6 +340,14 @@ PYBIND11_MODULE(backend, m)
     })
     .def_property_readonly("points", &cvgl_data::Lidar::get_points)
     .def_property_readonly("name", &cvgl_data::Lidar::get_name)
+    .def(py::pickle(
+        [](const cvgl_data::Lidar& obj) {
+          return obj.pickle();
+        },
+        [](py::tuple t) {
+          return cvgl_data::Lidar::unpickle(t);
+        }
+    ))
   ;
   py::class_<cvgl_data::LidarLoader, std::shared_ptr<cvgl_data::LidarLoader>, cvgl_data::Loader>(m, "LidarLoader", py::dynamic_attr())
     .def("__repr__", [](cvgl_data::LidarLoader& self){
@@ -314,6 +370,14 @@ PYBIND11_MODULE(backend, m)
         return self.get_points();
       }
     )
+    .def(py::pickle(
+        [](const cvgl_data::Lidars& obj) {
+          return obj.pickle();
+        },
+        [](py::tuple t) {
+          return cvgl_data::Lidars::unpickle(t);
+        }
+    ))
   ;
   py::class_<cvgl_data::LidarsLoader, std::shared_ptr<cvgl_data::LidarsLoader>, cvgl_data::NamedDataLoader>(m, "LidarsLoader", py::dynamic_attr())
     .def("__repr__", [](cvgl_data::LidarsLoader& self){
@@ -328,6 +392,14 @@ PYBIND11_MODULE(backend, m)
     .def_property("image", &cvgl_data::Map::get_image, &cvgl_data::Map::set_image)
     .def_property_readonly("name", &cvgl_data::Map::get_name)
     .def_property_readonly("meters_per_pixel", &cvgl_data::Map::get_meters_per_pixel)
+    .def(py::pickle(
+        [](const cvgl_data::Map& obj) {
+          return obj.pickle();
+        },
+        [](py::tuple t) {
+          return cvgl_data::Map::unpickle(t);
+        }
+    ))
   ;
   py::class_<cvgl_data::MapLoader, std::shared_ptr<cvgl_data::MapLoader>, cvgl_data::Loader>(m, "MapLoader", py::dynamic_attr())
     .def("__repr__", [](cvgl_data::MapLoader& self){
@@ -346,15 +418,23 @@ PYBIND11_MODULE(backend, m)
     .def("__repr__", [](cvgl_data::Frame& self){
       return self.to_string();
     })
-    .def("move_ego", [](cvgl_data::Frame& self, cosy::Rigid<float, 3> oldego_to_newego){
-        py::gil_scoped_release gil;
-        return self.move_ego(oldego_to_newego);
-      }
-    )
+    // .def("move_ego", [](cvgl_data::Frame& self, cosy::Rigid<float, 3> oldego_to_newego){
+    //     py::gil_scoped_release gil;
+    //     return self.move_ego(oldego_to_newego);
+    //   }
+    // )
     .def_property_readonly("scene_name", &cvgl_data::Frame::get_scene_name)
     .def_property_readonly("location", &cvgl_data::Frame::get_location)
     .def_property_readonly("dataset", &cvgl_data::Frame::get_dataset)
     .def_property_readonly("name", &cvgl_data::Frame::get_name)
+    .def(py::pickle(
+        [](const cvgl_data::Frame& obj) {
+          return obj.pickle();
+        },
+        [](py::tuple t) {
+          return cvgl_data::Frame::unpickle(t);
+        }
+    ))
   ;
   py::class_<cvgl_data::FrameLoader, std::shared_ptr<cvgl_data::FrameLoader>, cvgl_data::NamedDataLoader>(m, "FrameLoader", py::dynamic_attr())
     .def("__repr__", [](cvgl_data::FrameLoader& self){

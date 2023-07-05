@@ -19,6 +19,8 @@
 
 namespace cvgl_data {
 
+class FrameLoader;
+
 cosy::Rigid<float, 3> yaml_to_transform(const YAML::Node& node)
 {
   auto translation_node = node["translation"];
@@ -360,9 +362,11 @@ public:
     return m_timestamp;
   }
 
-  virtual std::shared_ptr<Data> move_ego(cosy::Rigid<float, 3> oldego_to_newego) = 0;
+  // virtual std::shared_ptr<Data> move_ego(std::shared_ptr<FrameLoader> frame_loader, cosy::Rigid<float, 3> oldego_to_newego) = 0;
 
   virtual void dummy() = 0;
+
+  virtual py::tuple pickle() const = 0;
 
   virtual std::map<std::string, std::string> get_string_members(std::string inner_indent) const
   {
@@ -370,6 +374,8 @@ public:
     result["timestamp"] = std::to_string(m_timestamp);
     return result;
   }
+
+  static std::shared_ptr<Data> unpickle(py::tuple t);
 
 private:
   uint64_t m_timestamp;
@@ -442,15 +448,15 @@ public:
     return m_data;
   }
 
-  std::shared_ptr<Data> move_ego(cosy::Rigid<float, 3> oldego_to_newego)
-  {
-    std::map<std::string, std::shared_ptr<Data>> data;
-    for (auto pair : m_data)
-    {
-      data[pair.first] = pair.second->move_ego(oldego_to_newego);
-    }
-    return std::make_shared<NamedData>(this->get_timestamp(), data);
-  }
+  // std::shared_ptr<Data> move_ego(std::shared_ptr<FrameLoader> frame_loader, cosy::Rigid<float, 3> oldego_to_newego)
+  // {
+  //   std::map<std::string, std::shared_ptr<Data>> data;
+  //   for (auto pair : m_data)
+  //   {
+  //     data[pair.first] = pair.second->move_ego(frame_loader, oldego_to_newego);
+  //   }
+  //   return std::make_shared<NamedData>(this->get_timestamp(), data);
+  // }
 
   void dummy() {}
 
@@ -462,6 +468,30 @@ public:
       result[data.first] = data.second->to_string(inner_indent);
     }
     return result;
+  }
+
+  virtual py::tuple pickle() const
+  {
+    std::vector<py::object> result;
+    result.push_back(py::cast(this->get_timestamp()));
+    for (const auto& data : m_data)
+    {
+      result.push_back(py::make_tuple(py::cast(data.first), data.second->pickle()));
+    }
+    return py::make_tuple(py::cast("NamedData"), py::make_tuple(py::cast(result)));
+  }
+
+  static NamedData unpickle(py::tuple t)
+  {
+    t = t[1].cast<py::tuple>();
+    std::vector<py::object> t0 = py::cast<std::vector<py::object>>(t[0]);
+    std::map<std::string, std::shared_ptr<Data>> data;
+    for (size_t i = 1; i < t0.size(); ++i)
+    {
+      auto pair = py::cast<std::pair<std::string, py::tuple>>(t0[i]);
+      data[pair.first] = Data::unpickle(pair.second);
+    }
+    return NamedData(py::cast<uint64_t>(t0[0]), data);
   }
 
 private:
@@ -534,10 +564,10 @@ public:
     return m_transform;
   }
 
-  std::shared_ptr<Data> move_ego(cosy::Rigid<float, 3> oldego_to_newego)
-  {
-    return std::make_shared<EgoToWorld>(this->get_timestamp(), m_transform * oldego_to_newego.inverse());
-  }
+  // std::shared_ptr<Data> move_ego(std::shared_ptr<FrameLoader> frame_loader, cosy::Rigid<float, 3> oldego_to_newego)
+  // {
+  //   return std::make_shared<EgoToWorld>(this->get_timestamp(), m_transform * oldego_to_newego.inverse());
+  // }
 
   void dummy() {}
 
@@ -546,6 +576,17 @@ public:
     std::map<std::string, std::string> result = Data::get_string_members(inner_indent);
     result["transform"] = "cosy.Rigid";
     return result;
+  }
+
+  virtual py::tuple pickle() const
+  {
+    return py::make_tuple(py::cast("EgoToWorld"), py::make_tuple(py::cast(this->get_timestamp()), py::cast(m_transform)));
+  }
+
+  static EgoToWorld unpickle(py::tuple t)
+  {
+    t = t[1].cast<py::tuple>();
+    return EgoToWorld(py::cast<uint64_t>(t[0]), py::cast<cosy::Rigid<float, 3>>(t[1]));
   }
 
 private:
@@ -622,11 +663,10 @@ private:
 class GeoPose : public Data
 {
 public:
-  GeoPose(uint64_t timestamp, xti::vec2d latlon, float bearing, std::shared_ptr<EgoToWorldLoader> ego_to_world_loader)
+  GeoPose(uint64_t timestamp, xti::vec2d latlon, float bearing)
     : Data(timestamp)
     , m_latlon(latlon)
     , m_bearing(bearing)
-    , m_ego_to_world_loader(ego_to_world_loader)
   {
   }
 
@@ -640,36 +680,38 @@ public:
     return m_bearing;
   }
 
-  std::shared_ptr<Data> move_ego(cosy::Rigid<float, 3> oldego_to_newego_3d)
-  {
-    if (!m_ego_to_world_loader)
-    {
-      throw std::runtime_error("Scene does not contain ego_to_world data");
-    }
-    cosy::Rigid<float, 3> oldego_to_world_3d = m_ego_to_world_loader->load2(this->get_timestamp())->get_transform();
-    auto _3d_to_2d = [](cosy::Rigid<float, 3> x_to_world){
-      xti::vec3d forward = xt::linalg::dot(x_to_world.get_rotation(), xti::vec3d({1.0, 0.0, 0.0}));
-      return cosy::Rigid(
-        cosy::angle_to_rotation_matrix(cosy::angle_between_vectors(xti::vec2d({1.0, 0.0}), xti::vec2d({forward(0), forward(1)}))),
-        xti::vec2d({x_to_world.get_translation()(0), x_to_world.get_translation()(1)})
-      );
-    };
+  // std::shared_ptr<Data> move_ego(std::shared_ptr<FrameLoader> frame_loader, cosy::Rigid<float, 3> oldego_to_newego_3d)
+  // {
+  //   // Check if ego_to_world is in frame_loader
+  //   if (frame_loader->get_loaders().count("ego_to_world") == 0)
+  //   {
+  //     throw std::runtime_error("Scene does not contain ego_to_world data");
+  //   }
+  //   std::shared_ptr<EgoToWorldLoader> ego_to_world_loader = std::dynamic_pointer_cast<EgoToWorldLoader>(frame_loader->get_loaders().at("ego_to_world"));
+  //   cosy::Rigid<float, 3> oldego_to_world_3d = ego_to_world_loader->load2(this->get_timestamp())->get_transform();
+  //   auto _3d_to_2d = [](cosy::Rigid<float, 3> x_to_world){
+  //     xti::vec3d forward = xt::linalg::dot(x_to_world.get_rotation(), xti::vec3d({1.0, 0.0, 0.0}));
+  //     return cosy::Rigid(
+  //       cosy::angle_to_rotation_matrix(cosy::angle_between_vectors(xti::vec2d({1.0, 0.0}), xti::vec2d({forward(0), forward(1)}))),
+  //       xti::vec2d({x_to_world.get_translation()(0), x_to_world.get_translation()(1)})
+  //     );
+  //   };
 
-    cosy::Rigid<float, 2> oldego_to_world_2d = _3d_to_2d(oldego_to_world_3d);
-    cosy::Rigid<float, 2> newego_to_world_2d = _3d_to_2d(oldego_to_world_3d * oldego_to_newego_3d.inverse());
+  //   cosy::Rigid<float, 2> oldego_to_world_2d = _3d_to_2d(oldego_to_world_3d);
+  //   cosy::Rigid<float, 2> newego_to_world_2d = _3d_to_2d(oldego_to_world_3d * oldego_to_newego_3d.inverse());
 
-    cosy::proj::Transformer epsg3857_to_epsg4326("epsg:3857", "epsg:4326");
-    cosy::proj::Transformer epsg4326_to_epsg3857 = *epsg3857_to_epsg4326.inverse();
+  //   cosy::proj::Transformer epsg3857_to_epsg4326("epsg:3857", "epsg:4326");
+  //   cosy::proj::Transformer epsg4326_to_epsg3857 = *epsg3857_to_epsg4326.inverse();
 
-    cosy::ScaledRigid<float, 2> oldego_to_epsg3857_2d = geopose_to_epsg3857(m_latlon, m_bearing, epsg4326_to_epsg3857);
-    cosy::ScaledRigid<float, 2> world_to_epsg3857_2d = oldego_to_epsg3857_2d * cosy::ScaledRigid<float, 2>(oldego_to_world_2d.inverse());
+  //   cosy::ScaledRigid<float, 2> oldego_to_epsg3857_2d = geopose_to_epsg3857(m_latlon, m_bearing, epsg4326_to_epsg3857);
+  //   cosy::ScaledRigid<float, 2> world_to_epsg3857_2d = oldego_to_epsg3857_2d * cosy::ScaledRigid<float, 2>(oldego_to_world_2d.inverse());
 
 
-    xti::vec2d latlon = epsg3857_to_epsg4326.transform(world_to_epsg3857_2d.transform(newego_to_world_2d.get_translation()));
-    float bearing = cosy::degrees(epsg3857_to_epsg4326.transform_angle(cosy::rotation_matrix_to_angle((world_to_epsg3857_2d * cosy::ScaledRigid<float, 2>(newego_to_world_2d)).get_rotation())));
+  //   xti::vec2d latlon = epsg3857_to_epsg4326.transform(world_to_epsg3857_2d.transform(newego_to_world_2d.get_translation()));
+  //   float bearing = cosy::degrees(epsg3857_to_epsg4326.transform_angle(cosy::rotation_matrix_to_angle((world_to_epsg3857_2d * cosy::ScaledRigid<float, 2>(newego_to_world_2d)).get_rotation())));
 
-    return std::make_shared<GeoPose>(this->get_timestamp(), latlon, bearing, m_ego_to_world_loader);
-  }
+  //   return std::make_shared<GeoPose>(this->get_timestamp(), latlon, bearing);
+  // }
 
   void dummy() {}
 
@@ -681,16 +723,26 @@ public:
     return result;
   }
 
+  virtual py::tuple pickle() const
+  {
+    return py::make_tuple(py::cast("GeoPose"), py::make_tuple(py::cast(this->get_timestamp()), py::cast(m_latlon), py::cast(m_bearing)));
+  }
+
+  static GeoPose unpickle(py::tuple t)
+  {
+    t = t[1].cast<py::tuple>();
+    return GeoPose(py::cast<uint64_t>(t[0]), py::cast<xti::vec2d>(t[1]), py::cast<float>(t[2]));
+  }
+
 private:
   xti::vec2d m_latlon;
   float m_bearing;
-  std::shared_ptr<EgoToWorldLoader> m_ego_to_world_loader;
 };
 
 class GeoPoseLoader : public Loader
 {
 public:
-  static std::shared_ptr<GeoPoseLoader> construct(Path path, std::shared_ptr<EgoToWorldLoader> ego_to_world_loader)
+  static std::shared_ptr<GeoPoseLoader> construct(Path path)
   {
     path = path / "geopose.npz";
     auto npz = xt::load_npz(path);
@@ -701,14 +753,13 @@ public:
     {
       throw std::runtime_error(XTI_TO_STRING("Got invalid shapes in file " << path.string() << "\ntimestamps.shape=[" << timestamps.shape()[0] << "] latlons.shape=[" << latlons.shape()[0] << ", " << latlons.shape()[1] << "] bearings.shape=[" << bearings.shape()[0] << "]"));
     }
-    return std::make_shared<GeoPoseLoader>(std::move(timestamps), std::move(latlons), std::move(bearings), ego_to_world_loader, path);
+    return std::make_shared<GeoPoseLoader>(std::move(timestamps), std::move(latlons), std::move(bearings), path);
   }
 
-  GeoPoseLoader(xt::xtensor<uint64_t, 1>&& timestamps, xt::xtensor<float, 2>&& latlons, xt::xtensor<float, 1>&& bearings, std::shared_ptr<EgoToWorldLoader> ego_to_world_loader, std::filesystem::path path)
+  GeoPoseLoader(xt::xtensor<uint64_t, 1>&& timestamps, xt::xtensor<float, 2>&& latlons, xt::xtensor<float, 1>&& bearings, std::filesystem::path path)
     : Loader(std::move(timestamps), path)
     , m_latlons(std::move(latlons))
     , m_bearings(std::move(bearings))
-    , m_ego_to_world_loader(ego_to_world_loader)
   {
   }
 
@@ -732,13 +783,12 @@ public:
       latlon = (1 - alpha) * xt::view(m_latlons, nearest.first.index, xt::all()) + alpha * xt::view(m_latlons, nearest.second.index, xt::all());
       bearing = (1 - alpha) * m_bearings(nearest.first.index) + alpha * m_bearings(nearest.second.index);
     }
-    return std::make_shared<GeoPose>(timestamp, latlon, bearing, m_ego_to_world_loader);
+    return std::make_shared<GeoPose>(timestamp, latlon, bearing);
   }
 
 private:
   xt::xtensor<float, 2> m_latlons;
   xt::xtensor<float, 1> m_bearings;
-  std::shared_ptr<EgoToWorldLoader> m_ego_to_world_loader;
 };
 
 
@@ -759,10 +809,10 @@ public:
     return m_score;
   }
 
-  std::shared_ptr<Data> move_ego(cosy::Rigid<float, 3> oldego_to_newego)
-  {
-   return std::make_shared<OutlierScore>(this->get_timestamp(), m_score);
-  }
+  // std::shared_ptr<Data> move_ego(std::shared_ptr<FrameLoader> frame_loader, cosy::Rigid<float, 3> oldego_to_newego)
+  // {
+  //   return std::make_shared<OutlierScore>(*this);
+  // }
 
   void dummy() {}
 
@@ -771,6 +821,17 @@ public:
     std::map<std::string, std::string> result = Data::get_string_members(inner_indent);
     result["score"] = XTI_TO_STRING(m_score);
     return result;
+  }
+
+  virtual py::tuple pickle() const
+  {
+    return py::make_tuple(py::cast("OutlierScore"), py::make_tuple(py::cast(this->get_timestamp()), py::cast(m_score)));
+  }
+
+  static OutlierScore unpickle(py::tuple t)
+  {
+    t = t[1].cast<py::tuple>();
+    return OutlierScore(py::cast<uint64_t>(t[0]), py::cast<float>(t[1]));
   }
 
 private:
@@ -865,10 +926,10 @@ public:
     return m_projection;
   }
 
-  std::shared_ptr<Data> move_ego(cosy::Rigid<float, 3> oldego_to_newego)
-  {
-    return std::make_shared<Camera>(this->get_timestamp(), m_name, xt::xtensor<uint8_t, 3>(m_image), oldego_to_newego * m_cam_to_ego, m_projection);
-  }
+  // std::shared_ptr<Data> move_ego(std::shared_ptr<FrameLoader> frame_loader, cosy::Rigid<float, 3> oldego_to_newego)
+  // {
+  //   return std::make_shared<Camera>(this->get_timestamp(), m_name, xt::xtensor<uint8_t, 3>(m_image), oldego_to_newego * m_cam_to_ego, m_projection);
+  // }
 
   void dummy() {}
 
@@ -880,6 +941,17 @@ public:
     result["intr"] = "np.ndarray";
     result["image"] = XTI_TO_STRING("np.ndarray(shape=(" << m_image.shape()[0] << ", " << m_image.shape()[1] << ", " << m_image.shape()[2] << "))");
     return result;
+  }
+
+  virtual py::tuple pickle() const
+  {
+    return py::make_tuple(py::cast("Camera"), py::make_tuple(py::cast(this->get_timestamp()), py::cast(m_name), py::cast(m_image), py::cast(m_cam_to_ego), py::cast(m_projection)));
+  }
+
+  static Camera unpickle(py::tuple t)
+  {
+    t = t[1].cast<py::tuple>();
+    return Camera(py::cast<uint64_t>(t[0]), py::cast<std::string>(t[1]), py::cast<xt::xtensor<uint8_t, 3>>(t[2]), py::cast<cosy::Rigid<float, 3>>(t[3]), py::cast<cosy::PinholeK<float, 3>>(t[4]));
   }
 
 private:
@@ -1298,10 +1370,10 @@ public:
     return m_points;
   }
 
-  std::shared_ptr<Data> move_ego(cosy::Rigid<float, 3> oldego_to_newego)
-  {
-    return std::make_shared<Lidar>(this->get_timestamp(), m_name, oldego_to_newego.transform_all(m_points));
-  }
+  // std::shared_ptr<Data> move_ego(std::shared_ptr<FrameLoader> frame_loader, cosy::Rigid<float, 3> oldego_to_newego)
+  // {
+  //   return std::make_shared<Lidar>(this->get_timestamp(), m_name, oldego_to_newego.transform_all(m_points));
+  // }
 
   void dummy() {}
 
@@ -1311,6 +1383,17 @@ public:
     result["name"] = "\"" + m_name + "\"";
     result["points"] = XTI_TO_STRING("np.ndarray(shape=(" << m_points.shape()[0] << ", " << m_points.shape()[1] << "))");
     return result;
+  }
+
+  virtual py::tuple pickle() const
+  {
+    return py::make_tuple(py::cast("Lidar"), py::make_tuple(py::cast(this->get_timestamp()), py::cast(m_name), py::cast(m_points)));
+  }
+
+  static Lidar unpickle(py::tuple t)
+  {
+    t = t[1].cast<py::tuple>();
+    return Lidar(py::cast<uint64_t>(t[0]), py::cast<std::string>(t[1]), py::cast<xt::xtensor<float, 2>>(t[2]));
   }
 
 private:
@@ -1456,10 +1539,10 @@ public:
     return points;
   }
 
-  std::shared_ptr<Data> move_ego(cosy::Rigid<float, 3> oldego_to_newego)
-  {
-    return std::make_shared<Lidars>(static_cast<NamedData&>(*this->NamedData::move_ego(oldego_to_newego)));
-  }
+  // std::shared_ptr<Data> move_ego(std::shared_ptr<FrameLoader> frame_loader, cosy::Rigid<float, 3> oldego_to_newego)
+  // {
+  //   return std::make_shared<Lidars>(static_cast<NamedData&>(*this->NamedData::move_ego(frame_loader, oldego_to_newego)));
+  // }
 
   void dummy() {}
 
@@ -1473,6 +1556,17 @@ public:
     }
     result["points"] = XTI_TO_STRING("np.ndarray(shape=(" << total_num_points << ", " << 3 << "))");
     return result;
+  }
+
+  virtual py::tuple pickle() const
+  {
+    return py::make_tuple(py::cast("Lidars"), this->NamedData::pickle());
+  }
+
+  static Lidars unpickle(py::tuple t)
+  {
+    t = t[1].cast<py::tuple>();
+    return Lidars(NamedData::unpickle(t));
   }
 };
 
@@ -1526,10 +1620,10 @@ public:
     return m_meters_per_pixel;
   }
 
-  std::shared_ptr<Data> move_ego(cosy::Rigid<float, 3> oldego_to_newego)
-  {
-    throw std::runtime_error("move_ego is not implemented for Map");
-  }
+  // std::shared_ptr<Data> move_ego(std::shared_ptr<FrameLoader> frame_loader, cosy::Rigid<float, 3> oldego_to_newego)
+  // {
+  //   throw std::runtime_error("move_ego is not implemented for Map");
+  // }
 
   void dummy() {}
 
@@ -1540,6 +1634,17 @@ public:
     result["meters_per_pixel"] = std::to_string(m_meters_per_pixel);
     result["image"] = XTI_TO_STRING("np.ndarray(shape=(" << m_image.shape()[0] << ", " << m_image.shape()[1] << ", " << m_image.shape()[2] << "))");
     return result;
+  }
+
+  virtual py::tuple pickle() const
+  {
+    return py::make_tuple(py::cast("Map"), py::make_tuple(py::cast(this->get_timestamp()), py::cast(m_name), py::cast(m_image), py::cast(m_meters_per_pixel)));
+  }
+
+  static Map unpickle(py::tuple t)
+  {
+    t = t[1].cast<py::tuple>();
+    return Map(py::cast<uint64_t>(t[0]), py::cast<std::string>(t[1]), py::cast<xt::xtensor<uint8_t, 3>>(t[2]), py::cast<float>(t[3]));
   }
 
 private:
@@ -1636,8 +1741,17 @@ private:
 class Frame : public NamedData
 {
 public:
-  Frame(std::filesystem::path scene_name, std::string location, std::string dataset, std::shared_ptr<NamedData> data, std::string name)
+  Frame(std::string scene_name, std::string location, std::string dataset, std::shared_ptr<NamedData> data, std::string name)
     : NamedData(*data)
+    , m_scene_name(scene_name)
+    , m_location(location)
+    , m_dataset(dataset)
+    , m_name(name)
+  {
+  }
+
+  Frame(std::string scene_name, std::string location, std::string dataset, NamedData&& data, std::string name)
+    : NamedData(std::move(data))
     , m_scene_name(scene_name)
     , m_location(location)
     , m_dataset(dataset)
@@ -1665,10 +1779,10 @@ public:
     return m_name;
   }
 
-  std::shared_ptr<Data> move_ego(cosy::Rigid<float, 3> oldego_to_newego)
-  {
-    return std::make_shared<Frame>(m_scene_name, m_location, m_dataset, std::static_pointer_cast<NamedData>(this->NamedData::move_ego(oldego_to_newego)), m_name);
-  }
+  // std::shared_ptr<Data> move_ego(std::shared_ptr<FrameLoader> frame_loader, cosy::Rigid<float, 3> oldego_to_newego)
+  // {
+  //   return std::make_shared<Frame>(m_scene_name, m_location, m_dataset, std::static_pointer_cast<NamedData>(this->NamedData::move_ego(frame_loader, oldego_to_newego)), m_name);
+  // }
 
   virtual std::map<std::string, std::string> get_string_members(std::string inner_indent) const
   {
@@ -1678,6 +1792,17 @@ public:
     result["dataset"] = "\"" + m_dataset+ "\"";
     result["name"] = "\"" + m_name + "\"";
     return result;
+  }
+
+  virtual py::tuple pickle() const
+  {
+    return py::make_tuple(py::cast("Frame"), py::make_tuple(py::cast(m_scene_name), py::cast(m_location), py::cast(m_dataset), this->NamedData::pickle(), py::cast(m_name)));
+  }
+
+  static Frame unpickle(py::tuple t)
+  {
+    t = t[1].cast<py::tuple>();
+    return Frame(py::cast<std::string>(t[0]), py::cast<std::string>(t[1]), py::cast<std::string>(t[2]), NamedData::unpickle(t[3]), py::cast<std::string>(t[4]));
   }
 
 private:
@@ -1757,7 +1882,7 @@ public:
 
     if (std::filesystem::exists(path / "geopose.npz"))
     {
-      std::shared_ptr<GeoPoseLoader> geopose_loader = GeoPoseLoader::construct(path, ego_to_world_loader);
+      std::shared_ptr<GeoPoseLoader> geopose_loader = GeoPoseLoader::construct(path);
       loaders["geopose"] = geopose_loader;
     }
 
@@ -1915,7 +2040,7 @@ public:
 
     // Image is loaded with bearing pointing upwards in image, but we want it to point in positive first axis direction, so add 180deg to bearing
     data["map"] = std::make_shared<Map>(0, m_name, tiledwebmaps::load_metric(*m_tileloader, latlon, bearing + 180.0, meters_per_pixel, shape, m_zoom), meters_per_pixel);
-    data["geopose"] = std::make_shared<GeoPose>(0, latlon, bearing, std::shared_ptr<EgoToWorldLoader>());
+    data["geopose"] = std::make_shared<GeoPose>(0, latlon, bearing);
 
     return std::make_shared<Frame>(m_name, location, m_name, std::make_shared<NamedData>(0, data), XTI_TO_STRING(m_name << "-z" << m_zoom << "-lat" << latlon(0) << "-lon" << latlon(1) << "-b" << bearing));
   }
@@ -1934,5 +2059,53 @@ private:
   std::string m_name;
   size_t m_zoom;
 };
+
+
+
+
+std::shared_ptr<Data> Data::unpickle(py::tuple t)
+{
+  std::string classname = t[0].cast<std::string>();
+  if (classname == "EgoToWorld")
+  {
+    return std::make_shared<EgoToWorld>(EgoToWorld::unpickle(t));
+  }
+  else if (classname == "GeoPose")
+  {
+    return std::make_shared<GeoPose>(GeoPose::unpickle(t));
+  }
+  else if (classname == "OutlierScore")
+  {
+    return std::make_shared<OutlierScore>(OutlierScore::unpickle(t));
+  }
+  else if (classname == "Camera")
+  {
+    return std::make_shared<Camera>(Camera::unpickle(t));
+  }
+  else if (classname == "Lidar")
+  {
+    return std::make_shared<Lidar>(Lidar::unpickle(t));
+  }
+  else if (classname == "Lidars")
+  {
+    return std::make_shared<Lidars>(Lidars::unpickle(t));
+  }
+  else if (classname == "Map")
+  {
+    return std::make_shared<Map>(Map::unpickle(t));
+  }
+  else if (classname == "Frame")
+  {
+    return std::make_shared<Frame>(Frame::unpickle(t));
+  }
+  else if (classname == "NamedData")
+  {
+    return std::make_shared<NamedData>(NamedData::unpickle(t));
+  }
+  else
+  {
+    throw std::runtime_error("Data: Unknown class " + classname);
+  }
+}
 
 } // end of ns cvgl_data
