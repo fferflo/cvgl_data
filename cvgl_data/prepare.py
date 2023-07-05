@@ -1,4 +1,4 @@
-import os, pyunpack, tqdm, imageio, requests, tarfile, cosy, cv2, skimage.transform
+import os, pyunpack, tqdm, imageio, requests, tarfile, cosy, cv2, skimage.transform, cvgl_data
 import numpy as np
 import pypeln as pl
 
