@@ -341,12 +341,11 @@ for scene in scenes:
 
 dataset = MyDataset(tileloader, scene_timestamps_pairs)
 dataloader = DataLoader(dataset, batch_size=4, shuffle=True, num_workers=4)
-# cvgl_data releases the GIL for all operations, such that multiple workers can fetch data concurrently
 ```
 
 ## Notes
 
-- The [GIL](https://en.wikipedia.org/wiki/Global_interpreter_lock) is released for all operations, such that multiple calls can be made concurrently, e.g. when using this library from a multi-threaded data-loader.
+- The [GIL](https://en.wikipedia.org/wiki/Global_interpreter_lock) is released for all operations, such that multiple calls can be made concurrently in multiple threads.
 - We use the following coordinate system conventions:
     - Ego: x, y, z = forward, left, up
     - Camera: x, y, z = right, down, forward
