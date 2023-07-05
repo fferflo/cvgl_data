@@ -145,7 +145,7 @@ def resize(path, min_size, skip=lambda n: False, preprocess=None, load=imageio.i
         imageio.imwrite(tempfile_jpg, image)
         os.remove(file_oldext)
         os.rename(tempfile_jpg, file_jpg)
-    stream = pl.thread.map(sace, stream, workers=4, maxsize=4)
+    stream = pl.thread.map(save, stream, workers=4, maxsize=4)
 
     for _ in tqdm.tqdm(stream, total=len(tasks)):
         pass
