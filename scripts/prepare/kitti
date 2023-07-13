@@ -9,19 +9,19 @@ parser.add_argument("--min-pixels", type=int, default=-1)
 args = parser.parse_args()
 
 files = [
-    "2011_10_03_drive_0027_sync.zip",
-    "2011_10_03_drive_0042_sync.zip",
-    "2011_10_03_drive_0034_sync.zip",
-    "2011_09_30_drive_0016_sync.zip",
-    "2011_09_30_drive_0018_sync.zip",
-    "2011_09_30_drive_0020_sync.zip",
-    "2011_09_30_drive_0027_sync.zip",
-    "2011_09_30_drive_0028_sync.zip",
-    "2011_09_30_drive_0033_sync.zip",
-    "2011_09_30_drive_0034_sync.zip",
-    "data_odometry_color.zip",
-    "data_odometry_poses.zip",
-    "data_odometry_velodyne.zip",
+    "2011_10_03_drive_0027_sync.zip", # Raw > Residential
+    "2011_10_03_drive_0042_sync.zip", # Raw > Road
+    "2011_10_03_drive_0034_sync.zip", # Raw > Residential
+    "2011_09_30_drive_0016_sync.zip", # Raw > Residential
+    "2011_09_30_drive_0018_sync.zip", # Raw > Residential
+    "2011_09_30_drive_0020_sync.zip", # Raw > Residential
+    "2011_09_30_drive_0027_sync.zip", # Raw > Residential
+    "2011_09_30_drive_0028_sync.zip", # Raw > Residential
+    "2011_09_30_drive_0033_sync.zip", # Raw > Residential
+    "2011_09_30_drive_0034_sync.zip", # Raw > Residential
+    "data_odometry_color.zip", # Odometry
+    "data_odometry_poses.zip", # Odometry
+    "data_odometry_velodyne.zip", # Odometry
     "2011_09_30_calib.zip",
     "2011_10_03_calib.zip",
 ]
