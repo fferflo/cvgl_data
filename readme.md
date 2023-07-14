@@ -60,7 +60,7 @@ The following loads an index of a dataset from disk with meta-data such as camer
 
 ```python
 >>> import cvgl_data
->>> scenes = cvgl_data.ground.load("~/argoverse-v1")
+>>> scenes = cvgl_data.load("~/argoverse-v1")
 ```
 
 Each dataset consists of a list of scenes. To inspect the sensors used in a scene:
@@ -224,7 +224,7 @@ Download the pseudo-labels from the following link (currently without Kitti and 
 The pseudo-label files also follow the *cvgl-data* format and can be integrated without replacing any files in the original dataset directories. After downloading and extracting the pseudo-labels, they can be included when loading a dataset as follows:
 
 ```python
->>> scenes = cvgl_data.ground.load("~/argoverse-v1", updates=["/path/to/extracted/pseudolabels/"])
+>>> scenes = cvgl_data.load("~/argoverse-v1", updates=["/path/to/extracted/pseudolabels/"])
 ```
 
 When `updates` is passed, the function will first check all provided paths when looking for a file (e.g. `geopose.npz` for pseudo-labels), and only fallback to the original file if no update was found. The provided path should contain one folder per dataset and follow the *cvgl-data* format per dataset.
