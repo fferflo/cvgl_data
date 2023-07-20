@@ -438,6 +438,11 @@ public:
     return m_data[name];
   }
 
+  void remove(std::string name)
+  {
+    m_data.erase(name);
+  }
+
   std::map<std::string, std::shared_ptr<Data>>& get_all()
   {
     return m_data;
@@ -520,6 +525,11 @@ public:
   std::shared_ptr<Loader> get(std::string name)
   {
     return m_loaders[name];
+  }
+
+  void remove(std::string name)
+  {
+    m_loaders.erase(name);
   }
 
   std::map<std::string, std::shared_ptr<Loader>>& get_loaders()

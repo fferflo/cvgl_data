@@ -47,6 +47,7 @@ PYBIND11_MODULE(backend, m)
       return self.get_all().size();
     })
     .def("__getitem__", &cvgl_data::NamedData::get)
+    .def("__delitem__", &cvgl_data::NamedData::remove)
     .def("__contains__", [](cvgl_data::NamedData& self, std::string name){
       return self.get_all().find(name) != self.get_all().end();
     })
@@ -83,6 +84,7 @@ PYBIND11_MODULE(backend, m)
       return self.get_loaders().size();
     })
     .def("__getitem__", &cvgl_data::NamedDataLoader::get)
+    .def("__delitem__", &cvgl_data::NamedDataLoader::remove)
     .def("load", [](cvgl_data::NamedDataLoader& self, uint64_t timestamp){
         py::gil_scoped_release gil;
         return self.load(timestamp);
