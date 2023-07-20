@@ -12,7 +12,7 @@ files = [
     "2011_10_03_drive_0027_sync.zip", # Raw > Residential
     "2011_10_03_drive_0042_sync.zip", # Raw > Road
     "2011_10_03_drive_0034_sync.zip", # Raw > Residential
-    "2011_09_30_drive_0016_sync.zip", # Raw > Residential
+    "2011_09_30_drive_0016_sync.zip", # Raw > Road
     "2011_09_30_drive_0018_sync.zip", # Raw > Residential
     "2011_09_30_drive_0020_sync.zip", # Raw > Residential
     "2011_09_30_drive_0027_sync.zip", # Raw > Residential
