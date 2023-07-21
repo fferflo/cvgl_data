@@ -38,9 +38,9 @@ cosy::Rigid<float, 3> yaml_to_transform(const YAML::Node& node)
   return result;
 }
 
-cosy::PinholeK<float, 3> yaml_to_projection(const YAML::Node& node)
+xti::mat3f yaml_to_projection(const Yaml& node)
 {
-  xti::matXT<float, 3> result;
+  xti::mat3f result;
   for (size_t r = 0; r < 3; r++)
   {
     for (size_t c = 0; c < 3; c++)
@@ -48,7 +48,7 @@ cosy::PinholeK<float, 3> yaml_to_projection(const YAML::Node& node)
       result(r, c) = node[r][c].as<float>();
     }
   }
-  return cosy::PinholeK<float, 3>(std::move(result));
+  return result;
 }
 
 template <typename TElementType, size_t TRank, typename TInput>
@@ -620,7 +620,7 @@ public:
     m_transformations.reserve(matrices.shape()[0]);
     for (size_t row = 0; row < matrices.shape()[0]; row++)
     {
-      xti::mat4d m;
+      xti::mat4f m;
       for (size_t r = 0; r < 4; r++)
       {
         for (size_t c = 0; c < 4; c++)
@@ -902,7 +902,7 @@ private:
 class Camera : public Data // xyz -> right down forward
 {
 public:
-  Camera(uint64_t timestamp, std::string name, xt::xtensor<uint8_t, 3>&& image, cosy::Rigid<float, 3> cam_to_ego, cosy::PinholeK<float, 3> projection)
+  Camera(uint64_t timestamp, std::string name, xt::xtensor<uint8_t, 3>&& image, cosy::Rigid<float, 3> cam_to_ego, xti::mat3f projection)
     : Data(timestamp)
     , m_name(name)
     , m_image(std::move(image))
@@ -931,7 +931,7 @@ public:
     return m_cam_to_ego;
   }
 
-  cosy::PinholeK<float, 3> get_projection() const
+  xti::mat3f get_projection() const
   {
     return m_projection;
   }
@@ -961,14 +961,14 @@ public:
   static Camera unpickle(py::tuple t)
   {
     t = t[1].cast<py::tuple>();
-    return Camera(py::cast<uint64_t>(t[0]), py::cast<std::string>(t[1]), py::cast<xt::xtensor<uint8_t, 3>>(t[2]), py::cast<cosy::Rigid<float, 3>>(t[3]), py::cast<cosy::PinholeK<float, 3>>(t[4]));
+    return Camera(py::cast<uint64_t>(t[0]), py::cast<std::string>(t[1]), py::cast<xt::xtensor<uint8_t, 3>>(t[2]), py::cast<cosy::Rigid<float, 3>>(t[3]), py::cast<xti::mat3f>(t[4]));
   }
 
 private:
   std::string m_name;
   xt::xtensor<uint8_t, 3> m_image;
   cosy::Rigid<float, 3> m_cam_to_ego;
-  cosy::PinholeK<float, 3> m_projection;
+  xti::mat3f m_projection;
 };
 
 using CamToEgoMapper = std::function<cosy::Rigid<float, 3>(cosy::Rigid<float, 3> oldcam_to_ego, std::optional<cosy::Rigid<float, 3>> egotc_to_world)>;
@@ -976,12 +976,12 @@ using CamToEgoMapper = std::function<cosy::Rigid<float, 3>(cosy::Rigid<float, 3>
 class CameraLoader : public Loader
 {
 public:
-  CameraLoader(std::filesystem::path path, std::string camera_name, std::string filetype, std::vector<cosy::Rigid<float, 3>>&& oldcam_to_ego, std::shared_ptr<EgoToWorldLoader> ego_to_world_loader, xt::xtensor<uint64_t, 1>&& timestamps, xti::vec2u resolution, cosy::PinholeK<float, 3> old_intr, cosy::PinholeK<float, 3> new_intr, std::vector<CamToEgoMapper> cam_to_ego_mappers = std::vector<CamToEgoMapper>())
+  CameraLoader(std::filesystem::path path, std::string camera_name, std::string filetype, std::vector<cosy::Rigid<float, 3>>&& oldcam_to_ego, std::shared_ptr<EgoToWorldLoader> ego_to_world_loader, xt::xtensor<uint64_t, 1>&& timestamps, xti::vec2u resolution, xti::mat3f old_intr, xti::mat3f new_intr, std::vector<CamToEgoMapper> cam_to_ego_mappers = std::vector<CamToEgoMapper>())
     : CameraLoader(path, camera_name, filetype, std::move(oldcam_to_ego), ego_to_world_loader, TimeSequence(std::move(timestamps), path / "timestamps.npz"), resolution, old_intr, new_intr, std::move(cam_to_ego_mappers))
   {
   }
 
-  CameraLoader(std::filesystem::path path, std::string camera_name, std::string filetype, std::vector<cosy::Rigid<float, 3>>&& oldcam_to_ego, std::shared_ptr<EgoToWorldLoader> ego_to_world_loader, TimeSequence&& timestamps, xti::vec2u resolution, cosy::PinholeK<float, 3> old_intr, cosy::PinholeK<float, 3> new_intr, std::vector<CamToEgoMapper> cam_to_ego_mappers = std::vector<CamToEgoMapper>())
+  CameraLoader(std::filesystem::path path, std::string camera_name, std::string filetype, std::vector<cosy::Rigid<float, 3>>&& oldcam_to_ego, std::shared_ptr<EgoToWorldLoader> ego_to_world_loader, TimeSequence&& timestamps, xti::vec2u resolution, xti::mat3f old_intr, xti::mat3f new_intr, std::vector<CamToEgoMapper> cam_to_ego_mappers = std::vector<CamToEgoMapper>())
     : Loader(std::move(timestamps))
     , m_path(path)
     , m_camera_name(camera_name)
@@ -1015,7 +1015,7 @@ public:
       cam_to_ego.reserve(matrices.shape()[0]);
       for (size_t row = 0; row < matrices.shape()[0]; row++)
       {
-        xti::mat4d m;
+        xti::mat4f m;
         for (size_t r = 0; r < 4; r++)
         {
           for (size_t c = 0; c < 4; c++)
@@ -1027,27 +1027,27 @@ public:
       }
     }
 
-    cosy::PinholeK<float, 3> intr = yaml_to_projection(metadata["intr"]);
+    xti::mat3f intr = yaml_to_projection(metadata["intr"]);
     std::string filetype = metadata["filetype"].as<std::string>();
     xti::vec2u resolution({metadata["resolution"][0].as<uint32_t>(), metadata["resolution"][1].as<uint32_t>()});
     return std::make_shared<CameraLoader>(path, camera_name, filetype, std::move(cam_to_ego), ego_to_world_loader, std::move(timestamps), resolution, intr, intr);
   }
 
 private:
-  std::shared_ptr<CameraLoader> update(std::string camera_name, xti::vec2u resolution, cosy::PinholeK<float, 3> intr, std::vector<CamToEgoMapper> cam_to_ego_mappers)
+  std::shared_ptr<CameraLoader> update(std::string camera_name, xti::vec2u resolution, xti::mat3f intr, std::vector<CamToEgoMapper> cam_to_ego_mappers)
   {
     return std::make_shared<CameraLoader>(m_path, camera_name, m_filetype, std::vector<cosy::Rigid<float, 3>>(m_oldcam_to_ego), m_ego_to_world_loader, TimeSequence(this->get_timesequence()), resolution, m_old_intr, intr, cam_to_ego_mappers);
   }
 
 public:
-  std::shared_ptr<CameraLoader> update(std::string camera_name, xti::vec2u resolution, cosy::PinholeK<float, 3> intr, CamToEgoMapper cam_to_ego_mapper)
+  std::shared_ptr<CameraLoader> update(std::string camera_name, xti::vec2u resolution, xti::mat3f intr, CamToEgoMapper cam_to_ego_mapper)
   {
     std::vector<CamToEgoMapper> cam_to_ego_mappers = m_cam_to_ego_mappers;
     cam_to_ego_mappers.push_back(cam_to_ego_mapper);
     return update(camera_name, resolution, intr, cam_to_ego_mappers);
   }
 
-  std::shared_ptr<CameraLoader> update(std::string camera_name, xti::vec2u resolution, cosy::PinholeK<float, 3> intr)
+  std::shared_ptr<CameraLoader> update(std::string camera_name, xti::vec2u resolution, xti::mat3f intr)
   {
     return update(camera_name, resolution, intr, m_cam_to_ego_mappers);
   }
@@ -1062,7 +1062,7 @@ public:
     return m_resolution;
   }
 
-  cosy::PinholeK<float, 3> get_intr() const
+  xti::mat3f get_intr() const
   {
     return m_new_intr;
   }
@@ -1139,7 +1139,7 @@ public:
     cv::Mat image_cv = tiledwebmaps::safe_imread(image_file.string());
 
     // Anti-alias image
-    float scale = m_new_intr.get_matrix()(0, 0) / m_old_intr.get_matrix()(0, 0);
+    float scale = m_new_intr(0, 0) / m_old_intr(0, 0);
     if (scale < 1)
     {
       float sigma = (1.0 / scale - 1) / 2;
@@ -1157,7 +1157,7 @@ public:
     float d_inv = 1.0 / xt::linalg::dot(normal, ego_to_oldcam.get_translation())();
 
     xt::xtensor<float, 2> homography_euclidean = oldcam_to_newcam.get_rotation() + d_inv * xt::linalg::outer(oldcam_to_newcam.get_translation(), normal);
-    xt::xtensor<float, 2> homography = xt::linalg::dot(m_new_intr.get_matrix(), xt::linalg::dot(homography_euclidean, xt::linalg::inv(m_old_intr.get_matrix())));
+    xt::xtensor<float, 2> homography = xt::linalg::dot(m_new_intr, xt::linalg::dot(homography_euclidean, xt::linalg::inv(m_old_intr)));
     homography /= homography(2, 2);
     homography_euclidean /= homography_euclidean(2, 2);
 
@@ -1189,8 +1189,8 @@ private:
   std::shared_ptr<EgoToWorldLoader> m_ego_to_world_loader;
 
   std::vector<cosy::Rigid<float, 3>> m_oldcam_to_ego;
-  cosy::PinholeK<float, 3> m_old_intr;
-  cosy::PinholeK<float, 3> m_new_intr;
+  xti::mat3f m_old_intr;
+  xti::mat3f m_new_intr;
   xti::vec2u m_resolution;
   std::vector<CamToEgoMapper> m_cam_to_ego_mappers;
 };
@@ -1232,13 +1232,13 @@ public:
       }
       new_resolution = xt::minimum(m_tile_shape, new_resolution);
 
-      xti::matXT<float, 3> new_intr = camera->get_intr().get_matrix();
+      xti::matXT<float, 3> new_intr = camera->get_intr();
       for (size_t r = 0; r < 2; r++)
       {
         new_intr(r, 2) -= offset(1 - r);
       }
 
-      result.push_back(camera->update(camera_name, new_resolution, cosy::PinholeK<float, 3>(new_intr)));
+      result.push_back(camera->update(camera_name, new_resolution, new_intr));
     };
     
     if (xt::all(resolution <= m_tile_shape + m_tile_crop_margin))
@@ -1292,7 +1292,7 @@ public:
     float scale = m_scale_op(*camera);
 
     xti::vec2u new_resolution = xt::cast<int32_t>(camera->get_resolution() * scale);
-    xti::matXT<float, 3> new_intr = camera->get_intr().get_matrix();
+    xti::matXT<float, 3> new_intr = camera->get_intr();
     for (size_t r = 0; r < 2; r++)
     {
       for (size_t c = 0; c < 3; c++)
@@ -1301,7 +1301,7 @@ public:
       }
     }
 
-    result.push_back(camera->update(camera->get_name(), new_resolution, cosy::PinholeK<float, 3>(new_intr)));
+    result.push_back(camera->update(camera->get_name(), new_resolution, new_intr));
 
     return result;
   }
