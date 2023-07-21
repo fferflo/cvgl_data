@@ -19,7 +19,6 @@ pybind11_add_module(backend backend/main.cpp)
 target_compile_features(backend PUBLIC cxx_std_17)
 target_link_libraries(backend PUBLIC
   xtensor
-  xtensor::optimize
   xtensor::use_xsimd
   xtensor-io
   xtensor-blas
