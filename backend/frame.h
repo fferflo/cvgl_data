@@ -1233,13 +1233,17 @@ public:
     // Compute homography
     cosy::Rigid<float, 3> ego_to_oldcam = oldcam_to_ego.inverse();
     cosy::Rigid<float, 3> ego_to_newcam = newcam_to_ego.inverse();
-
     cosy::Rigid<float, 3> oldcam_to_newcam = ego_to_newcam * ego_to_oldcam.inverse();
+    xt::xtensor<float, 2> homography_euclidean = oldcam_to_newcam.get_rotation();
 
     xti::vec3f normal = xt::linalg::dot(ego_to_oldcam.get_rotation(), xti::vec3f({0, 0, 1}));
-    float d_inv = 1.0 / xt::linalg::dot(normal, ego_to_oldcam.get_translation())();
+    float d = xt::linalg::dot(normal, ego_to_oldcam.get_translation())();
+    if (std::abs(d) > 1e-5)
+    {
+      float d_inv = 1.0 / d;
+      homography_euclidean = homography_euclidean + d_inv * xt::linalg::outer(oldcam_to_newcam.get_translation(), normal);
+    }
 
-    xt::xtensor<float, 2> homography_euclidean = oldcam_to_newcam.get_rotation() + d_inv * xt::linalg::outer(oldcam_to_newcam.get_translation(), normal);
     xt::xtensor<float, 2> homography = xt::linalg::dot(m_new_intr, xt::linalg::dot(homography_euclidean, xt::linalg::inv(m_old_intr)));
     homography /= homography(2, 2);
     homography_euclidean /= homography_euclidean(2, 2);
