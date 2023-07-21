@@ -597,6 +597,10 @@ public:
     std::map<std::string, std::shared_ptr<Data>> data;
     for (auto& loader : m_loaders)
     {
+      if (verbose)
+      {
+        std::cout << "cvgl_data: Loading key=" << loader.first << std::endl;
+      }
       data[loader.first] = loader.second->load(timestamp, verbose);
     }
     return std::make_shared<NamedData>(timestamp, data);
