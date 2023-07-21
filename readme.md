@@ -44,7 +44,7 @@ If you find this library useful for your research, please consider citing:
 
 ### :file_folder::arrow_left: Downloading and converting data
 
-The following bash command converts the [Argoverse V1](https://www.argoverse.org/av1.html) dataset in the specified folder to the *cvgl-data* format:
+The following python script converts the [Argoverse V1](https://www.argoverse.org/av1.html) dataset in the specified folder to the *cvgl-data* format:
 
 ```bash
 python3 scripts/prepare/argoverse_v1 --path ~/argoverse-v1 --min-pixels 640 # Downsample
@@ -148,7 +148,7 @@ Once the meta-data is loaded, we can choose a scene and timestamp and load the c
 }
 ```
 
-The meta-data object `scene` and the timestamped data object `frame` have the same tree structure based on the grouping of sensors.
+The meta-data object `scene` and the timestamped data object `frame` have the same tree structure.
 
 ### :earth_africa::arrow_right: Loading data from tiled web maps
 
@@ -180,7 +180,7 @@ We can then define a virtual scene that provides map data and corresponding geo-
   location: "unknown-location",
   map: {
     image: np.ndarray(shape=(512, 512, 3)),
-    meters_per_pixel: 0.200000,
+    meters_per_pixel: 0.100000,
     name: "name-of-tileloader",
     timestamp: 0,
   },
