@@ -17,7 +17,7 @@ setup(
         "pyntcloud",
         "tqdm",
         "tinylogdir",
-        "tiledwebmaps",
+        "tiledwebmaps>=0.1.2",
         "open3d",
         "docker",
         "pyquaternion",
