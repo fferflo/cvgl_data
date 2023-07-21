@@ -85,10 +85,12 @@ PYBIND11_MODULE(backend, m)
     })
     .def("__getitem__", &cvgl_data::NamedDataLoader::get)
     .def("__delitem__", &cvgl_data::NamedDataLoader::remove)
-    .def("load", [](cvgl_data::NamedDataLoader& self, uint64_t timestamp){
+    .def("load", [](cvgl_data::NamedDataLoader& self, uint64_t timestamp, bool verbose){
         py::gil_scoped_release gil;
-        return self.load(timestamp);
-      }
+        return self.load(timestamp, verbose);
+      },
+      py::arg("timestamp"),
+      py::arg("verbose") = false
     )
     .def("keys", [](cvgl_data::NamedDataLoader& self){
       std::vector<std::string> result;
@@ -126,10 +128,12 @@ PYBIND11_MODULE(backend, m)
     .def("__repr__", [](cvgl_data::EgoToWorldLoader& self){
       return self.to_string();
     })
-    .def("load", [](cvgl_data::EgoToWorldLoader& self, uint64_t timestamp){
+    .def("load", [](cvgl_data::EgoToWorldLoader& self, uint64_t timestamp, bool verbose){
         py::gil_scoped_release gil;
-        return self.load(timestamp);
-      }
+        return self.load(timestamp, verbose);
+      },
+      py::arg("timestamp"),
+      py::arg("verbose") = false
     )
   ;
 
@@ -152,10 +156,12 @@ PYBIND11_MODULE(backend, m)
     .def("__repr__", [](cvgl_data::GeoPoseLoader& self){
       return self.to_string();
     })
-    .def("load", [](cvgl_data::GeoPoseLoader& self, uint64_t timestamp){
+    .def("load", [](cvgl_data::GeoPoseLoader& self, uint64_t timestamp, bool verbose){
         py::gil_scoped_release gil;
-        return self.load(timestamp);
-      }
+        return self.load(timestamp, verbose);
+      },
+      py::arg("timestamp"),
+      py::arg("verbose") = false
     )
   ;
 
@@ -177,10 +183,12 @@ PYBIND11_MODULE(backend, m)
     .def("__repr__", [](cvgl_data::OutlierScoreLoader& self){
       return self.to_string();
     })
-    .def("load", [](cvgl_data::OutlierScoreLoader& self, uint64_t timestamp){
+    .def("load", [](cvgl_data::OutlierScoreLoader& self, uint64_t timestamp, bool verbose){
         py::gil_scoped_release gil;
-        return self.load(timestamp);
-      }
+        return self.load(timestamp, verbose);
+      },
+      py::arg("timestamp"),
+      py::arg("verbose") = false
     )
   ;
 
@@ -207,7 +215,7 @@ PYBIND11_MODULE(backend, m)
     )
     .def("ResizeToFocalLength", [](float focal_length){
         return cvgl_data::cam_ops::Resize([=](const cvgl_data::CameraLoader& camera){
-          auto intr = camera.get_intr().get_matrix();
+          auto intr = camera.get_intr();
           float src_focal_length = 0.5 * (intr(0, 0) + intr(1, 1));
           return focal_length / src_focal_length;
         });
@@ -305,10 +313,12 @@ PYBIND11_MODULE(backend, m)
     .def("__repr__", [](cvgl_data::CameraLoader& self){
       return self.to_string();
     })
-    .def("load", [](cvgl_data::CameraLoader& self, uint64_t timestamp){
+    .def("load", [](cvgl_data::CameraLoader& self, uint64_t timestamp, bool verbose){
         py::gil_scoped_release gil;
-        return self.load(timestamp);
-      }
+        return self.load(timestamp, verbose);
+      },
+      py::arg("timestamp"),
+      py::arg("verbose") = false
     )
     .def_property_readonly("resolution", &cvgl_data::CameraLoader::get_resolution)
     .def_property_readonly("name", &cvgl_data::CameraLoader::get_name)
@@ -355,10 +365,12 @@ PYBIND11_MODULE(backend, m)
     .def("__repr__", [](cvgl_data::LidarLoader& self){
       return self.to_string();
     })
-    .def("load", [](cvgl_data::LidarLoader& self, uint64_t timestamp){
+    .def("load", [](cvgl_data::LidarLoader& self, uint64_t timestamp, bool verbose){
         py::gil_scoped_release gil;
-        return self.load(timestamp);
-      }
+        return self.load(timestamp, verbose);
+      },
+      py::arg("timestamp"),
+      py::arg("verbose") = false
     )
     .def_property_readonly("name", &cvgl_data::LidarLoader::get_name)
   ;
@@ -407,10 +419,12 @@ PYBIND11_MODULE(backend, m)
     .def("__repr__", [](cvgl_data::MapLoader& self){
       return self.to_string();
     })
-    .def("load", [](cvgl_data::MapLoader& self, uint64_t timestamp){
+    .def("load", [](cvgl_data::MapLoader& self, uint64_t timestamp, bool verbose){
         py::gil_scoped_release gil;
-        return self.load(timestamp);
-      }
+        return self.load(timestamp, verbose);
+      },
+      py::arg("timestamp"),
+      py::arg("verbose") = false
     )
     .def_property_readonly("name", &cvgl_data::MapLoader::get_name)
     .def_property_readonly("resolution", &cvgl_data::MapLoader::get_resolution)
@@ -442,7 +456,7 @@ PYBIND11_MODULE(backend, m)
     .def("__repr__", [](cvgl_data::FrameLoader& self){
       return self.to_string();
     })
-    .def(py::init([](std::string path, std::vector<std::shared_ptr<cvgl_data::cam_ops::Op>> cam_ops, std::vector<std::shared_ptr<cvgl_data::lidar_ops::Op>> lidar_ops, std::vector<std::string> updates){
+    .def(py::init([](std::string path, std::vector<std::shared_ptr<cvgl_data::cam_ops::Op>> cam_ops, std::vector<std::shared_ptr<cvgl_data::lidar_ops::Op>> lidar_ops, std::vector<std::string> updates, bool verbose){
         py::gil_scoped_release gil;
         std::vector<std::filesystem::path> std_updates;
         for (std::string update : updates)
@@ -450,17 +464,20 @@ PYBIND11_MODULE(backend, m)
           std_updates.push_back(std::filesystem::path(update));
         }
 
-        return cvgl_data::FrameLoader::construct(path, cam_ops, lidar_ops, std_updates);
+        return cvgl_data::FrameLoader::construct(path, cam_ops, lidar_ops, std_updates, verbose);
       }),
       py::arg("path"),
       py::arg("cam_ops") = std::vector<std::shared_ptr<cvgl_data::cam_ops::Op>>(),
       py::arg("lidar_ops") = std::vector<std::shared_ptr<cvgl_data::lidar_ops::Op>>(),
-      py::arg("updates") = std::vector<std::string>()
+      py::arg("updates") = std::vector<std::string>(),
+      py::arg("verbose") = false
     )
-    .def("load", [](cvgl_data::FrameLoader& self, uint64_t timestamp){
+    .def("load", [](cvgl_data::FrameLoader& self, uint64_t timestamp, bool verbose){
         py::gil_scoped_release gil;
-        return self.load(timestamp);
-      }
+        return self.load(timestamp, verbose);
+      },
+      py::arg("timestamp"),
+      py::arg("verbose") = false
     )
     .def_property_readonly("scene_name", &cvgl_data::FrameLoader::get_scene_name)
     .def_property_readonly("location", &cvgl_data::FrameLoader::get_location)
@@ -479,15 +496,16 @@ PYBIND11_MODULE(backend, m)
       py::arg("name"),
       py::arg("zoom")
     )
-    .def("load", [](cvgl_data::TiledWebMapsLoader& self, xti::vec2f latlon, float bearing, float meters_per_pixel, xti::vec2s shape, std::string location){
+    .def("load", [](cvgl_data::TiledWebMapsLoader& self, xti::vec2f latlon, float bearing, float meters_per_pixel, xti::vec2s shape, std::string location, bool verbose){
         py::gil_scoped_release gil;
-        return self.load(latlon, bearing, meters_per_pixel, shape, location);
+        return self.load(latlon, bearing, meters_per_pixel, shape, location, verbose);
       },
       py::arg("latlon"),
       py::arg("bearing"),
       py::arg("meters_per_pixel"),
       py::arg("shape"),
-      py::arg("location") = "unknown-location"
+      py::arg("location") = "unknown-location",
+      py::arg("verbose") = false
     )
     .def_property_readonly("name", &cvgl_data::TiledWebMapsLoader::get_name)
     .def_property_readonly("zoom", &cvgl_data::TiledWebMapsLoader::get_zoom)

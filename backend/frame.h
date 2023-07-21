@@ -19,9 +19,89 @@
 
 namespace cvgl_data {
 
+class Yaml
+{
+public:
+  Yaml(std::filesystem::path file, bool verbose)
+    : m_file(file)
+    , m_parent_keys("")
+  {
+    if (verbose)
+    {
+      std::cout << "cvgl_data: Loading yaml file " << file.string() << std::flush;
+    }
+    m_node = YAML::LoadFile(file.string());
+    if (verbose)
+    {
+      std::cout << " done" << std::endl;
+    }
+  }
+
+  template <typename T>
+  Yaml operator[](T key) const
+  {
+    if (!m_node[key])
+    {
+      throw std::runtime_error(XTI_TO_STRING("Yaml file " << m_file.string() << " does not contain key \"" << key << "\" for parents \"" << m_parent_keys << "\""));
+    }
+    return Yaml(m_node[key], XTI_TO_STRING(m_parent_keys << "." << key));
+  }
+
+  template <typename T>
+  T as() const
+  {
+    try
+    {
+      return m_node.as<T>();
+    }
+    catch (const YAML::Exception& e)
+    {
+      throw std::runtime_error(XTI_TO_STRING("Failed to convert object at \"" << m_parent_keys << "\" to type \"" << typeid(T).name() << "\": " << e.what()));
+    }
+  }
+
+private:
+  Yaml(YAML::Node node, std::string parent_keys)
+    : m_node(node)
+  {
+  }
+
+  std::filesystem::path m_file;
+  YAML::Node m_node;
+  std::string m_parent_keys;
+};
+
+auto load_npz(std::filesystem::path path, bool verbose)
+{
+  if (verbose)
+  {
+    std::cout << "cvgl_data: Loading npz file " << path.string() << std::flush;
+  }
+  auto npz = xt::load_npz(path);
+  if (verbose)
+  {
+    std::cout << " done" << std::endl;
+  }
+  return npz;
+}
+
+cv::Mat imread(std::filesystem::path path, bool verbose)
+{
+  if (verbose)
+  {
+    std::cout << "cvgl_data: Loading image " << path.string() << std::flush;
+  }
+  cv::Mat image = tiledwebmaps::safe_imread(path.string());
+  if (verbose)
+  {
+    std::cout << " done" << std::endl;
+  }
+  return image;
+}
+
 class FrameLoader;
 
-cosy::Rigid<float, 3> yaml_to_transform(const YAML::Node& node)
+cosy::Rigid<float, 3> yaml_to_transform(const Yaml& node)
 {
   auto translation_node = node["translation"];
   auto rotation_node = node["rotation"];
@@ -401,7 +481,7 @@ public:
 
   virtual ~Loader() = default;
 
-  virtual std::shared_ptr<Data> load(uint64_t timestamp) = 0;
+  virtual std::shared_ptr<Data> load(uint64_t timestamp, bool verbose) = 0;
 
   const TimeSequence& get_timesequence() const
   {
@@ -512,12 +592,12 @@ public:
   }
   virtual ~NamedDataLoader() = default;
 
-  std::shared_ptr<Data> load(uint64_t timestamp)
+  std::shared_ptr<Data> load(uint64_t timestamp, bool verbose)
   {
     std::map<std::string, std::shared_ptr<Data>> data;
     for (auto& loader : m_loaders)
     {
-      data[loader.first] = loader.second->load(timestamp);
+      data[loader.first] = loader.second->load(timestamp, verbose);
     }
     return std::make_shared<NamedData>(timestamp, data);
   }
@@ -606,9 +686,9 @@ private:
 class EgoToWorldLoader : public Loader
 {
 public:
-  static std::shared_ptr<EgoToWorldLoader> construct(Path path)
+  static std::shared_ptr<EgoToWorldLoader> construct(Path path, bool verbose)
   {
-    auto npz = xt::load_npz(path / "ego_to_world.npz");
+    auto npz = load_npz(path / "ego_to_world.npz", verbose);
     xt::xtensor<uint64_t, 1> timestamps = load_from_npz_int<uint64_t, 1>(npz["timestamps"]);
     xt::xtensor<float, 3> matrices = load_from_npz_float<float, 3>(npz["transforms"]);
     return std::make_shared<EgoToWorldLoader>(std::move(timestamps), matrices, path);
@@ -632,12 +712,12 @@ public:
     }
   }
 
-  std::shared_ptr<Data> load(uint64_t timestamp)
+  std::shared_ptr<Data> load(uint64_t timestamp, bool verbose)
   {
-    return load2(timestamp);
+    return load2(timestamp, verbose);
   }
 
-  std::shared_ptr<EgoToWorld> load2(uint64_t timestamp)
+  std::shared_ptr<EgoToWorld> load2(uint64_t timestamp, bool verbose)
   {
     auto nearest = this->get_timesequence().get_nearest2(timestamp);
     cosy::Rigid<float, 3> transform;
@@ -752,10 +832,10 @@ private:
 class GeoPoseLoader : public Loader
 {
 public:
-  static std::shared_ptr<GeoPoseLoader> construct(Path path)
+  static std::shared_ptr<GeoPoseLoader> construct(Path path, bool verbose)
   {
     path = path / "geopose.npz";
-    auto npz = xt::load_npz(path);
+    auto npz = load_npz(path, verbose);
     xt::xtensor<uint64_t, 1> timestamps = load_from_npz_int<uint64_t, 1>(npz["timestamps"]);
     xt::xtensor<float, 2> latlons = load_from_npz_float<float, 2>(npz["latlons"]);
     xt::xtensor<float, 1> bearings = load_from_npz_float<float, 1>(npz["bearings"]);
@@ -773,7 +853,7 @@ public:
   {
   }
 
-  std::shared_ptr<Data> load(uint64_t timestamp)
+  std::shared_ptr<Data> load(uint64_t timestamp, bool verbose)
   {
     auto nearest = this->get_timesequence().get_nearest2(timestamp);
     xti::vec2d latlon;
@@ -851,10 +931,10 @@ private:
 class OutlierScoreLoader : public Loader
 {
 public:
-  static std::shared_ptr<OutlierScoreLoader> construct(Path path)
+  static std::shared_ptr<OutlierScoreLoader> construct(Path path, bool verbose)
   {
     path = path / "outlier_scores.npz";
-    auto npz = xt::load_npz(path);
+    auto npz = load_npz(path, verbose);
     xt::xtensor<uint64_t, 1> timestamps = load_from_npz_int<uint64_t, 1>(npz["timestamps"]);
     xt::xtensor<float, 1> scores = load_from_npz_float<float, 1>(npz["scores"]);
     return std::make_shared<OutlierScoreLoader>(std::move(timestamps), std::move(scores), path);
@@ -871,7 +951,7 @@ public:
     return m_scores;
   }
 
-  std::shared_ptr<Data> load(uint64_t timestamp)
+  std::shared_ptr<Data> load(uint64_t timestamp, bool verbose)
   {
     auto nearest = this->get_timesequence().get_nearest2(timestamp);
     float score;
@@ -995,23 +1075,22 @@ public:
   {
   }
 
-  static std::shared_ptr<CameraLoader> from_path(Path path, std::string camera_name, std::shared_ptr<EgoToWorldLoader> ego_to_world_loader)
+  static std::shared_ptr<CameraLoader> from_path(Path path, std::string camera_name, std::shared_ptr<EgoToWorldLoader> ego_to_world_loader, bool verbose)
   {
-    YAML::Node metadata = YAML::LoadFile((path / "config.yaml").string());
+    Yaml metadata(path / "config.yaml", verbose);
     xt::xtensor<uint64_t, 1> timestamps;
     std::vector<cosy::Rigid<float, 3>> cam_to_ego;
     if (!std::filesystem::exists(path / "cam_to_ego.npz"))
     {
-      auto npz = xt::load_npz(path / "timestamps.npz");
+      auto npz = load_npz(path / "timestamps.npz", verbose);
       timestamps = load_from_npz_int<uint64_t, 1>(npz["timestamps"]);
       cam_to_ego.push_back(yaml_to_transform(metadata["cam_to_ego"]));
     }
     else
     {
-      auto npz = xt::load_npz(path / "cam_to_ego.npz");
+      auto npz = load_npz(path / "cam_to_ego.npz", verbose);
       timestamps = load_from_npz_int<uint64_t, 1>(npz["timestamps"]);
       xt::xtensor<float, 3> matrices = load_from_npz_float<float, 3>(npz["transforms"]);
-
       cam_to_ego.reserve(matrices.shape()[0]);
       for (size_t row = 0; row < matrices.shape()[0]; row++)
       {
@@ -1072,7 +1151,7 @@ public:
     return m_oldcam_to_ego;
   }
 
-  std::shared_ptr<Data> load(uint64_t timestamp)
+  std::shared_ptr<Data> load(uint64_t timestamp, bool verbose)
   {
     uint64_t cam_timestamp = this->get_timesequence().get_nearest1(timestamp).timestamp;
 
@@ -1081,8 +1160,8 @@ public:
     cosy::Rigid<float, 3> oldcam_to_ego;
     if (m_ego_to_world_loader)
     {
-      cosy::Rigid<float, 3> egotr_to_world = m_ego_to_world_loader->load2(timestamp)->get_transform();
-      cosy::Rigid<float, 3> egotc_to_world = m_ego_to_world_loader->load2(cam_timestamp)->get_transform();
+      cosy::Rigid<float, 3> egotr_to_world = m_ego_to_world_loader->load2(timestamp, verbose)->get_transform();
+      cosy::Rigid<float, 3> egotc_to_world = m_ego_to_world_loader->load2(cam_timestamp, verbose)->get_transform();
 
       ego_to_world = egotr_to_world;
 
@@ -1136,7 +1215,7 @@ public:
 
     // Load image
     std::filesystem::path image_file = m_path / "images" / (std::to_string(cam_timestamp) + "." + m_filetype);
-    cv::Mat image_cv = tiledwebmaps::safe_imread(image_file.string());
+    cv::Mat image_cv = imread(image_file, verbose);
 
     // Anti-alias image
     float scale = m_new_intr(0, 0) / m_old_intr(0, 0);
@@ -1414,9 +1493,9 @@ private:
 class LidarLoader : public Loader
 {
 public:
-  static std::shared_ptr<LidarLoader> construct(Path path, std::shared_ptr<EgoToWorldLoader> ego_to_world_loader)
+  static std::shared_ptr<LidarLoader> construct(Path path, std::shared_ptr<EgoToWorldLoader> ego_to_world_loader, bool verbose)
   {
-    auto npz = xt::load_npz(path / "timestamps.npz");
+    auto npz = load_npz(path / "timestamps.npz", verbose);
     xt::xtensor<uint64_t, 1> timestamps = load_from_npz_int<uint64_t, 1>(npz["timestamps"]);
     return std::make_shared<LidarLoader>(path, std::move(timestamps), ego_to_world_loader);
   }
@@ -1433,12 +1512,12 @@ public:
     return m_path.filename();
   }
 
-  std::shared_ptr<Data> load(uint64_t timestamp)
+  std::shared_ptr<Data> load(uint64_t timestamp, bool verbose)
   {
     uint64_t lidar_timestamp = this->get_timesequence().get_nearest1(timestamp).timestamp;
 
     std::filesystem::path points_file = m_path / "points" / (std::to_string(lidar_timestamp) + ".npz");
-    auto npz = xt::load_npz(points_file.string());
+    auto npz = load_npz(points_file, verbose);
     std::string key = "";
     if (npz.size() == 1)
     {
@@ -1461,8 +1540,8 @@ public:
 
     if (m_ego_to_world_loader)
     {
-      cosy::Rigid<float, 3> egotr_to_world = m_ego_to_world_loader->load2(timestamp)->get_transform();
-      cosy::Rigid<float, 3> egotl_to_world = m_ego_to_world_loader->load2(lidar_timestamp)->get_transform();
+      cosy::Rigid<float, 3> egotr_to_world = m_ego_to_world_loader->load2(timestamp, verbose)->get_transform();
+      cosy::Rigid<float, 3> egotl_to_world = m_ego_to_world_loader->load2(lidar_timestamp, verbose)->get_transform();
       cosy::Rigid<float, 3> egotl_to_egotr = egotr_to_world.inverse() * egotl_to_world;
       points = egotl_to_egotr.transform_all(std::move(points));
     }
@@ -1588,9 +1667,9 @@ public:
   {
   }
 
-  std::shared_ptr<Data> load(uint64_t timestamp)
+  std::shared_ptr<Data> load(uint64_t timestamp, bool verbose)
   {
-    auto super_loaded = std::static_pointer_cast<NamedData>(this->NamedDataLoader::load(timestamp));
+    auto super_loaded = std::static_pointer_cast<NamedData>(this->NamedDataLoader::load(timestamp, verbose));
     return std::make_shared<Lidars>(timestamp, super_loaded->get_all());
   }
 };
@@ -1676,16 +1755,16 @@ public:
   {
   }
 
-  static std::shared_ptr<MapLoader> from_path(Path path, std::string name)
+  static std::shared_ptr<MapLoader> from_path(Path path, std::string name, bool verbose)
   {
-    YAML::Node metadata = YAML::LoadFile((path / "config.yaml").string());
-    auto timestamps_npz = xt::load_npz(path / "timestamps.npz");
+    Yaml metadata(path / "config.yaml", verbose);
+    auto timestamps_npz = load_npz(path / "timestamps.npz", verbose);
     xt::xtensor<uint64_t, 1> timestamps = load_from_npz_int<uint64_t, 1>(timestamps_npz["timestamps"]);
 
     xt::xtensor<float, 1> meters_per_pixel;
     if (std::filesystem::exists(path / "meters_per_pixel.npz"))
     {
-      auto meters_per_pixel_npz = xt::load_npz(path / "meters_per_pixel.npz");
+      auto meters_per_pixel_npz = load_npz(path / "meters_per_pixel.npz", verbose);
       meters_per_pixel = load_from_npz_float<float, 1>(meters_per_pixel_npz["meters_per_pixel"]);
     }
     else
@@ -1709,7 +1788,7 @@ public:
     return m_resolution;
   }
 
-  std::shared_ptr<Data> load(uint64_t timestamp)
+  std::shared_ptr<Data> load(uint64_t timestamp, bool verbose)
   {
     auto nearest = this->get_timesequence().get_nearest1(timestamp);
     if (timestamp != nearest.timestamp)
@@ -1719,7 +1798,7 @@ public:
 
     // Load image
     std::filesystem::path image_file = m_path / "images" / (std::to_string(timestamp) + "." + m_filetype);
-    cv::Mat image_cv = tiledwebmaps::safe_imread(image_file.string());
+    cv::Mat image_cv = imread(image_file, verbose);
     auto image_bgr = xt::view(xti::from_opencv<uint8_t>(std::move(image_cv)), xt::all(), xt::all(), xt::range(0, 3));
     xt::xtensor<uint8_t, 3> image_rgb = xt::view(std::move(image_bgr), xt::all(), xt::all(), xt::range(xt::placeholders::_, xt::placeholders::_, -1));
 
@@ -1825,8 +1904,12 @@ private:
 class FrameLoader : public NamedDataLoader
 {
 public:
-  static std::shared_ptr<FrameLoader> construct(std::filesystem::path std_path, std::vector<std::shared_ptr<cam_ops::Op>> cam_ops, std::vector<std::shared_ptr<lidar_ops::Op>> lidar_ops, std::vector<std::filesystem::path> std_updates)
+  static std::shared_ptr<FrameLoader> construct(std::filesystem::path std_path, std::vector<std::shared_ptr<cam_ops::Op>> cam_ops, std::vector<std::shared_ptr<lidar_ops::Op>> lidar_ops, std::vector<std::filesystem::path> std_updates, bool verbose)
   {
+    if (verbose)
+    {
+      std::cout << "cvgl_data: Loading scene from " << std_path << std::endl;
+    }
     Path path(std_path, std_updates);
 
     std::filesystem::path yaml_path = (path / "config.yaml").std();
@@ -1834,7 +1917,7 @@ public:
     {
       throw std::runtime_error(XTI_TO_STRING("File " << yaml_path.string() << " is missing"));
     }
-    YAML::Node metadata = YAML::LoadFile(yaml_path.string());
+    Yaml metadata(yaml_path, verbose);
 
     std::string location = metadata["location"].as<std::string>();
     std::string dataset = metadata["dataset"].as<std::string>();
@@ -1845,13 +1928,17 @@ public:
     std::shared_ptr<EgoToWorldLoader> ego_to_world_loader;
     if (std::filesystem::exists(ego_to_world_path))
     {
-      ego_to_world_loader = EgoToWorldLoader::construct(path);
+      ego_to_world_loader = EgoToWorldLoader::construct(path, verbose);
       loaders["ego_to_world"] = ego_to_world_loader;
     }
 
     Path camera_path = path / "camera";
     if (std::filesystem::exists(camera_path))
     {
+      if (verbose)
+      {
+        std::cout << "cvgl_data: Loading cameras from " << camera_path.string() << std::endl;
+      }
       std::map<std::string, std::shared_ptr<CameraLoader>> camera_loaders;
       for (auto child_path : camera_path.list())
       {
@@ -1862,7 +1949,14 @@ public:
           {
             throw std::runtime_error(XTI_TO_STRING("Camera " << camera_name << " already exists"));
           }
-          camera_loaders[camera_name] = CameraLoader::from_path(child_path, camera_name, ego_to_world_loader);
+          try
+          {
+            camera_loaders[camera_name] = CameraLoader::from_path(child_path, camera_name, ego_to_world_loader, verbose);
+          }
+          catch (const std::runtime_error& e)
+          {
+            throw std::runtime_error(XTI_TO_STRING("Error while loading camera meta-data at " << child_path.string() << ":\n" << e.what()));
+          }
         }
       }
       for (const auto& op : cam_ops)
@@ -1892,19 +1986,23 @@ public:
 
     if (std::filesystem::exists(path / "geopose.npz"))
     {
-      std::shared_ptr<GeoPoseLoader> geopose_loader = GeoPoseLoader::construct(path);
+      std::shared_ptr<GeoPoseLoader> geopose_loader = GeoPoseLoader::construct(path, verbose);
       loaders["geopose"] = geopose_loader;
     }
 
     if (std::filesystem::exists(path / "outlier_scores.npz"))
     {
-      std::shared_ptr<OutlierScoreLoader> outlier_score_loader = OutlierScoreLoader::construct(path);
+      std::shared_ptr<OutlierScoreLoader> outlier_score_loader = OutlierScoreLoader::construct(path, verbose);
       loaders["outlier_score"] = outlier_score_loader;
     }
 
     Path lidar_path = path / "lidar";
     if (std::filesystem::exists(lidar_path))
     {
+      if (verbose)
+      {
+        std::cout << "cvgl_data: Loading lidars from " << lidar_path.string() << std::endl;
+      }
       std::map<std::string, std::shared_ptr<LidarLoader>> lidar_loaders;
       for (auto child_path : lidar_path.list())
       {
@@ -1915,7 +2013,14 @@ public:
           {
             throw std::runtime_error(XTI_TO_STRING("Lidar " << lidar_name << " already exists"));
           }
-          lidar_loaders[lidar_name] = LidarLoader::construct(child_path, ego_to_world_loader);
+          try
+          {
+            lidar_loaders[lidar_name] = LidarLoader::construct(child_path, ego_to_world_loader, verbose);
+          }
+          catch (const std::runtime_error& e)
+          {
+            throw std::runtime_error(XTI_TO_STRING("Error while loading lidar meta-data at " << child_path.string() << ":\n" << e.what()));
+          }
         }
       }
       for (const auto& op : lidar_ops)
@@ -1961,7 +2066,7 @@ public:
           {
             throw std::runtime_error(XTI_TO_STRING("Map " << map_name << " already exists"));
           }
-          loaders[map_name] = MapLoader::from_path(child_path, map_name);
+          loaders[map_name] = MapLoader::from_path(child_path, map_name, verbose);
         }
       }
       
@@ -1994,10 +2099,10 @@ public:
     return m_dataset;
   }
 
-  std::shared_ptr<Data> load(uint64_t timestamp)
+  std::shared_ptr<Data> load(uint64_t timestamp, bool verbose)
   {
     std::string name = m_dataset + "-" + get_scene_name() + "-t" + std::to_string(timestamp);
-    return std::make_shared<Frame>(this->get_scene_name(), m_location, m_dataset, std::static_pointer_cast<NamedData>(this->NamedDataLoader::load(timestamp)), name);
+    return std::make_shared<Frame>(this->get_scene_name(), m_location, m_dataset, std::static_pointer_cast<NamedData>(this->NamedDataLoader::load(timestamp, verbose)), name);
   }
 
   virtual std::map<std::string, std::string> get_string_members(std::string inner_indent) const
@@ -2044,7 +2149,7 @@ public:
     return m_zoom;
   }
 
-  std::shared_ptr<Data> load(xti::vec2f latlon, float bearing, float meters_per_pixel, xti::vec2s shape, std::string location)
+  std::shared_ptr<Data> load(xti::vec2f latlon, float bearing, float meters_per_pixel, xti::vec2s shape, std::string location, bool verbose)
   {
     std::map<std::string, std::shared_ptr<Data>> data;
 
