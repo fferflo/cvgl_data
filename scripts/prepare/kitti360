@@ -7,7 +7,7 @@ from pyquaternion import Quaternion
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--path", type=str, required=True)
-parser.add_argument("--min-pixels", type=int)
+parser.add_argument("--min-pixels", type=int, default=-1)
 parser.add_argument("--undistort-focal-length-factor", type=float, default=0.25)
 args = parser.parse_args()
 
@@ -276,11 +276,11 @@ for scene_name in tqdm.tqdm([f for f in os.listdir(os.path.join(download_path, "
 
         new_image_timestamps = []
         for image_file in sorted(os.listdir(src_image_path)):
-            if image_file.endswith(".jpg"):
+            if image_file.endswith(".png"):
                 frame_index = int(image_file[:-4])
                 shutil.copy(
                     os.path.join(src_image_path, image_file),
-                    os.path.join(dest_images_path, f"{image_timestamps[frame_index]}.jpg"),
+                    os.path.join(dest_images_path, f"{image_timestamps[frame_index]}.png"),
                 )
                 new_image_timestamps.append(image_timestamps[frame_index])
         image_timestamps = np.asarray(sorted(new_image_timestamps))
@@ -290,9 +290,9 @@ for scene_name in tqdm.tqdm([f for f in os.listdir(os.path.join(download_path, "
         cam_to_ego = imu_to_ego * cam_to_imu[camera_name]
 
         old_resolution = original_image_shape
-        new_resolution = list(imageio.imread(os.path.join(dest_images_path, f"{image_timestamps[0]}.jpg")).shape[:2])
+        new_resolution = list(imageio.imread(os.path.join(dest_images_path, f"{image_timestamps[0]}.png")).shape[:2])
         metadata = {
-            "filetype": "jpg",
+            "filetype": "png",
             "intr": fix_intr(intr, old_resolution, new_resolution).tolist(),
             "resolution": new_resolution,
             "timestamps": {

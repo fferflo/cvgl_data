@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import argparse, os, docker, shutil, rosbag, tqdm, sys, yaml, threading, cosy, math, imageio
+import argparse, os, docker, shutil, tqdm, sys, yaml, threading, cosy, math, imageio
 import open3d as o3d
 import numpy as np
 from pyquaternion import Quaternion
@@ -16,6 +16,18 @@ parser.add_argument("--rate", type=float, default=1.0, help="Rate at which to pl
 parser.add_argument("--queue_size", type=int, default=99999999, help="Size of subscriber and publisher queues of all ros nodes")
 parser.add_argument("--min-pixels", type=int, default=-1)
 args = parser.parse_args()
+
+try:
+    import rosbag
+except ImportError:
+    print("Rosbag library not found. Please install it via:\npip install --extra-index-url https://rospypi.github.io/simple/ rospy rosbag")
+    sys.exit(-1)
+
+try:
+    client = docker.from_env()
+except:
+    print("Failed to create docker client. Downloading the Ford AV dataset requires docker to be installed. (Some data is provided in rosbag format and requires ROS to extract. We use a docker image with ROS, play the rosbag file, convert the messages to a readable format and save the result to a host directory.)\n\nPlease install docker and make sure the docker daemon is running.")
+    sys.exit(-1)
 
 if not os.path.isdir(args.path):
     os.makedirs(args.path)
@@ -109,14 +121,11 @@ for date, drives in series:
                 camera_path = os.path.join(scene_path, "camera", camera)
                 images_path = os.path.join(camera_path, "images")
                 zipfile = os.path.join(download_path, f"{date}-{car}-{log}-{camera}.tar.gz")
-                resize = False
-                if not os.path.isdir(images_path):
-                    cvgl_data.prepare.download(f"{base_url}/{date}/{car}/{log}/{os.path.basename(zipfile)}", zipfile)
-                    resize = True # TODO: remove
-                if os.path.isfile(zipfile):
-                    cvgl_data.prepare.extract(zipfile, images_path)
-                    resize = True # TODO: remove
-                if resize and args.min_pixels > 0:
+
+                cvgl_data.prepare.download(f"{base_url}/{date}/{car}/{log}/{os.path.basename(zipfile)}", zipfile)
+                cvgl_data.prepare.extract(zipfile, images_path)
+
+                if args.min_pixels > 0:
                     cvgl_data.prepare.resize(images_path, (args.min_pixels, args.min_pixels))
 
                 # Timestamps
@@ -138,9 +147,9 @@ for date, drives in series:
 
                 # Metadata
                 old_resolution = camera_params[car][camera][1]
-                new_resolution = list(imageio.imread(os.path.join(images_path, f"{timestamps[0]}.jpg")).shape[:2])
+                new_resolution = list(imageio.imread(os.path.join(images_path, f"{timestamps[0]}.png")).shape[:2])
                 metadata = {
-                    "filetype": "jpg",
+                    "filetype": "png",
                     "intr": fix_intr(camera_params[car][camera][0], old_resolution, new_resolution).tolist(),
                     "resolution": new_resolution,
                     "timestamps": {
@@ -340,8 +349,6 @@ for bagfile in tqdm.tqdm([os.path.join(download_path, f) for f in sorted(os.list
 # #################### Convert bagfiles to pointcloud files ####################
 colors = ["red", "blue", "green", "yellow"]
 root_path = os.path.dirname(os.path.abspath(sys.argv[0]))
-
-client = docker.from_env()
 
 print(f"Building docker image {args.image}")
 image, docker_build_logs = client.images.build(path=os.path.join(root_path, "ford_avdata_util"), tag=args.image)

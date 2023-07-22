@@ -69,37 +69,12 @@ def extract(src, dest=None):
 def resize(path, min_size, skip=lambda n: False, preprocess=None, load=imageio.imread):
     min_size = np.asarray(min_size)
 
-    tempfile_marker = "__resize-images-temp-marker"
-    def to_tempfile(file):
-        file, extension = os.path.splitext(file)
-        return file + tempfile_marker + extension
-    def from_tempfile(file):
-        file, extension = os.path.splitext(file)
-        assert file.endswith(tempfile_marker)
-        file = file[:-len(tempfile_marker)]
-        return file + extension
-    def is_tempfile(file):
-        file, extension = os.path.splitext(file)
-        return file.endswith(tempfile_marker)
-
     tasks = []
     for subpath, dirs, files in os.walk(path):
         for file in files:
             if is_image_file(file):
                 file = os.path.join(subpath, file)
-                if skip(file):
-                    continue
-                if is_tempfile(file):
-                    tempfile = file
-                    file = from_tempfile(file) # TODO: this file has the wrong extension
-                    if os.path.isfile(file):
-                        print(f"Found temp-file {tempfile}, removing")
-                        os.remove(tempfile)
-                    else:
-                        print(f"Found temp-file {tempfile}, renaming to {os.path.basename(file)}")
-                        os.rename(tempfile, file)
-                else:
-                    tasks.append(file)
+                tasks.append(file)
     print(f"Found {len(tasks)} images in {path} that will be resized")
 
     stream = tasks
@@ -112,7 +87,7 @@ def resize(path, min_size, skip=lambda n: False, preprocess=None, load=imageio.i
             print(f"Failed to resize image file {file}")
             raise e
 
-        if len(image.shape) == 3 and image.shape[2] >= 3 and (np.all(np.asarray(image.shape[:2]) > min_size) or not file.endswith(".jpg") or not preprocess is None):
+        if len(image.shape) == 3 and image.shape[2] >= 3 and (np.all(np.asarray(image.shape[:2]) > min_size) or not preprocess is None):
             image = image[:, :, :3]
             return [(image, file)]
         else:
@@ -139,12 +114,8 @@ def resize(path, min_size, skip=lambda n: False, preprocess=None, load=imageio.i
 
     # Save frame
     @cvgl_data.unwrap
-    def save(image, file_oldext):
-        file_jpg = ".".join(file_oldext.split(".")[:-1]) + ".jpg"
-        tempfile_jpg = to_tempfile(file_jpg)
-        imageio.imwrite(tempfile_jpg, image)
-        os.remove(file_oldext)
-        os.rename(tempfile_jpg, file_jpg)
+    def save(image, file):
+        imageio.imwrite(file, image)
     stream = pl.thread.map(save, stream, workers=4, maxsize=4)
 
     for _ in tqdm.tqdm(stream, total=len(tasks)):
