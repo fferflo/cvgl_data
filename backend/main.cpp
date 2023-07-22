@@ -192,57 +192,39 @@ PYBIND11_MODULE(backend, m)
     )
   ;
 
-  auto cam_ops = m.def_submodule("cam_ops");
-
-  py::class_<cvgl_data::cam_ops::Op, std::shared_ptr<cvgl_data::cam_ops::Op>>(cam_ops, "Op", py::dynamic_attr());
-  py::class_<cvgl_data::cam_ops::Tile, std::shared_ptr<cvgl_data::cam_ops::Tile>, cvgl_data::cam_ops::Op>(cam_ops, "Tile", py::dynamic_attr())
-    .def(py::init([](xti::vec2u tile_shape, std::optional<xti::vec2u> tile_crop_margin){
-        return cvgl_data::cam_ops::Tile(tile_shape, tile_crop_margin);
-      }),
+  auto camera = m.def_submodule("camera")
+    .def("tile", [](std::shared_ptr<cvgl_data::FrameLoader> scene, xti::vec2u tile_shape, std::optional<xti::vec2u> tile_crop_margin){
+        scene->get("camera")->apply(cvgl_data::cam_ops::Tile(tile_shape, tile_crop_margin), true);
+      },
+      py::arg("scene"),
       py::arg("tile_shape"),
       py::arg("tile_crop_margin") = std::optional<xti::vec2u>()
     )
-  ;
-  py::class_<cvgl_data::cam_ops::Resize, std::shared_ptr<cvgl_data::cam_ops::Resize>, cvgl_data::cam_ops::Op>(cam_ops, "Resize", py::dynamic_attr());
-  py::class_<cvgl_data::cam_ops::Filter, std::shared_ptr<cvgl_data::cam_ops::Filter>, cvgl_data::cam_ops::Op>(cam_ops, "Filter", py::dynamic_attr());
-  py::class_<cvgl_data::cam_ops::Homography, std::shared_ptr<cvgl_data::cam_ops::Homography>, cvgl_data::cam_ops::Op>(cam_ops, "Homography", py::dynamic_attr());
-
-  cam_ops
-    .def("ResizeBy", [](float scale){
-        return cvgl_data::cam_ops::Resize([=](const cvgl_data::CameraLoader& camera){return scale;});
-      },
-      py::arg("scale")
-    )
-    .def("ResizeToFocalLength", [](float focal_length){
-        return cvgl_data::cam_ops::Resize([=](const cvgl_data::CameraLoader& camera){
+    .def("resize_to_focal_length", [](std::shared_ptr<cvgl_data::FrameLoader> scene, float focal_length){
+        scene->get("camera")->apply(cvgl_data::cam_ops::Resize([=](const cvgl_data::CameraLoader& camera){
           auto intr = camera.get_intr();
           float src_focal_length = 0.5 * (intr(0, 0) + intr(1, 1));
           return focal_length / src_focal_length;
-        });
+        }), true);
       },
+      py::arg("scene"),
+      py::arg("focal_length")
+    )
+    .def("resize_by", [](std::shared_ptr<cvgl_data::FrameLoader> scene, float scale){
+        scene->get("camera")->apply(cvgl_data::cam_ops::Resize([=](const cvgl_data::CameraLoader& camera){return scale;}), true);
+      },
+      py::arg("scene"),
       py::arg("scale")
     )
-    .def("KeepNames", [](std::vector<std::string> names){
-        return cvgl_data::cam_ops::Filter([=](const cvgl_data::CameraLoader& camera){
-          return std::find(names.begin(), names.end(), camera.get_name()) != names.end();
-        });
-      },
-      py::arg("names")
-    )
-    .def("None", [](){
-        return cvgl_data::cam_ops::Filter([=](const cvgl_data::CameraLoader& camera){
-          return false;
-        });
-      }
-    )
-    .def("ConstantHomography", [](cosy::Rigid<float, 3> newcam_to_oldcam){
-        return cvgl_data::cam_ops::Homography([=](cosy::Rigid<float, 3> oldcam_to_ego, std::optional<cosy::Rigid<float, 3>> ego_to_world){
+    .def("constant_homography", [](std::shared_ptr<cvgl_data::FrameLoader> scene, cosy::Rigid<float, 3> newcam_to_oldcam){
+        scene->get("camera")->apply(cvgl_data::cam_ops::Homography([=](cosy::Rigid<float, 3> oldcam_to_ego, std::optional<cosy::Rigid<float, 3>> ego_to_world){
           return oldcam_to_ego * newcam_to_oldcam;
-        });
+        }), true);
       },
+      py::arg("scene"),
       py::arg("newcam_to_oldcam")
     )
-    .def("AlignWithUpVectorHomography", [](std::string reference_frame){
+    .def("align_with_up_vector_homography", [](std::shared_ptr<cvgl_data::FrameLoader> scene, std::string reference_frame){
         bool use_world_ref;
         if (reference_frame == "world")
         {
@@ -256,7 +238,7 @@ PYBIND11_MODULE(backend, m)
         {
           throw std::invalid_argument("reference_frame must be either 'world' or 'ego'");
         }
-        return cvgl_data::cam_ops::Homography([=](cosy::Rigid<float, 3> cam_to_ego, std::optional<cosy::Rigid<float, 3>> ego_to_world){
+        auto op = cvgl_data::cam_ops::Homography([=](cosy::Rigid<float, 3> cam_to_ego, std::optional<cosy::Rigid<float, 3>> ego_to_world){
           cosy::Rigid<float, 3> cam_to_ref;
           if (use_world_ref)
           {
@@ -287,7 +269,9 @@ PYBIND11_MODULE(backend, m)
             return cam_to_ego;
           }
         });
+        scene->get("camera")->apply(op, true);
       },
+      py::arg("scene"),
       py::arg("reference_frame")
     )
   ;
@@ -323,27 +307,6 @@ PYBIND11_MODULE(backend, m)
     .def_property_readonly("resolution", &cvgl_data::CameraLoader::get_resolution)
     .def_property_readonly("name", &cvgl_data::CameraLoader::get_name)
     .def_property_readonly("intr", &cvgl_data::CameraLoader::get_intr)
-  ;
-
-  auto lidar_ops = m.def_submodule("lidar_ops");
-
-  py::class_<cvgl_data::lidar_ops::Op, std::shared_ptr<cvgl_data::lidar_ops::Op>>(lidar_ops, "Op", py::dynamic_attr());
-  py::class_<cvgl_data::lidar_ops::Filter, std::shared_ptr<cvgl_data::lidar_ops::Filter>, cvgl_data::lidar_ops::Op>(lidar_ops, "Filter", py::dynamic_attr());
-
-  lidar_ops
-    .def("KeepNames", [](std::vector<std::string> names){
-        return cvgl_data::lidar_ops::Filter([=](const cvgl_data::LidarLoader& lidar){
-          return std::find(names.begin(), names.end(), lidar.get_name()) != names.end();
-        });
-      },
-      py::arg("names")
-    )
-    .def("None", [](){
-        return cvgl_data::lidar_ops::Filter([=](const cvgl_data::LidarLoader& lidar){
-          return false;
-        });
-      }
-    )
   ;
 
   py::class_<cvgl_data::Lidar, std::shared_ptr<cvgl_data::Lidar>, cvgl_data::Data>(m, "Lidar", py::dynamic_attr())
@@ -456,7 +419,7 @@ PYBIND11_MODULE(backend, m)
     .def("__repr__", [](cvgl_data::FrameLoader& self){
       return self.to_string();
     })
-    .def(py::init([](std::string path, std::vector<std::shared_ptr<cvgl_data::cam_ops::Op>> cam_ops, std::vector<std::shared_ptr<cvgl_data::lidar_ops::Op>> lidar_ops, std::vector<std::string> updates, bool verbose){
+    .def(py::init([](std::string path, std::vector<std::string> updates, bool verbose){
         py::gil_scoped_release gil;
         std::vector<std::filesystem::path> std_updates;
         for (std::string update : updates)
@@ -464,11 +427,9 @@ PYBIND11_MODULE(backend, m)
           std_updates.push_back(std::filesystem::path(update));
         }
 
-        return cvgl_data::FrameLoader::construct(path, cam_ops, lidar_ops, std_updates, verbose);
+        return cvgl_data::FrameLoader::construct(path, std_updates, verbose);
       }),
       py::arg("path"),
-      py::arg("cam_ops") = std::vector<std::shared_ptr<cvgl_data::cam_ops::Op>>(),
-      py::arg("lidar_ops") = std::vector<std::shared_ptr<cvgl_data::lidar_ops::Op>>(),
       py::arg("updates") = std::vector<std::string>(),
       py::arg("verbose") = false
     )

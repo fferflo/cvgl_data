@@ -37,16 +37,14 @@ with open(args.config, "r") as f:
 tileloader, tileloader_zoom = twm.from_config(config)[args.tileloader]
 scenes = cvgl_data.load(
     config["datasets"][args.dataset],
-    cam_ops=[ # Uncomment to test cam_ops:
-        # cvgl_data.cam_ops.Tile(tile_shape=(320, 320), tile_crop_margin=(50, 50)),
-        # cvgl_data.cam_ops.ResizeBy(1.5),
-        # cvgl_data.cam_ops.ConstantHomography(cosy.Rigid(
-        #     rotation=R.from_rotvec(math.radians(10) * np.array([0, 1, 0])).as_matrix(),
-        # )),
-        # cvgl_data.cam_ops.AlignToZHomography(use_world_z=True),
-    ],
     updates=[os.path.join(p, args.tileloader) for p in config["updates"]] if ("updates" in config and not config["updates"] is None) else None,
 )
+# cvgl_data.camera.tile(scenes, tile_shape=(320, 320), tile_crop_margin=(50, 50))
+# cvgl_data.camera.resize_by(scenes, 0.5)
+# cvgl_data.camera.constant_homography(scenes, newcam_to_oldcam=cosy.Rigid(rotation=R.from_rotvec(math.radians(10) * np.array([0, 1, 0])).as_matrix()))
+# cvgl_data.camera.align_with_up_vector_homography(scenes, reference_frame="world")
+
+
 if not args.location is None:
     scenes = [scene for scene in scenes if scene.location == args.location]
 twm_scene = cvgl_data.load_tiledwebmaps(tileloader, args.tileloader, tileloader_zoom)

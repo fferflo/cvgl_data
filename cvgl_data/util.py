@@ -6,7 +6,7 @@ import concurrent.futures, os, yaml
 def load_tiledwebmaps(tileloader, name, zoom):
     return cvgl_data.TiledWebMapsLoader(tileloader, name, zoom)
 
-def load(path, cam_ops=[], lidar_ops=[], updates=None, as_dict=False, threads=None, verbose=False):
+def load(path, updates=None, as_dict=False, threads=None, verbose=False):
     if threads is None:
         threads = os.cpu_count()
     if verbose:
@@ -18,8 +18,6 @@ def load(path, cam_ops=[], lidar_ops=[], updates=None, as_dict=False, threads=No
 
         return cvgl_data.FrameLoader(
             scene_path,
-            cam_ops=cam_ops,
-            lidar_ops=lidar_ops,
             updates=[os.path.join(p, config["dataset"], os.path.basename(scene_path)) for p in updates] if not updates is None else [],
             verbose=verbose,
         )

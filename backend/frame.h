@@ -461,6 +461,8 @@ private:
   uint64_t m_timestamp;
 };
 
+class NamedDataLoader;
+
 class Loader : public ToStringHelper
 {
 public:
@@ -497,6 +499,9 @@ public:
     }
     return result;
   }
+
+  template <typename TFunctor>
+  void apply(TFunctor&& functor, bool fail_on_invalid_type);
 
 private:
   TimeSequence m_timesequence;
@@ -608,6 +613,10 @@ public:
 
   std::shared_ptr<Loader> get(std::string name)
   {
+    if (m_loaders.count(name) == 0)
+    {
+      throw std::runtime_error(XTI_TO_STRING("Loader " << name << " does not exist"));
+    }
     return m_loaders[name];
   }
 
@@ -636,10 +645,55 @@ public:
     return result;
   }
 
+  template <typename TFunctor>
+  void apply(TFunctor&& functor, bool fail_on_invalid_type)
+  {
+    using TChild = typename std::decay<TFunctor>::type::result_type;
+    std::map<std::string, std::shared_ptr<Loader>> new_loaders;
+    for (const auto& loader : m_loaders)
+    {
+      if (std::dynamic_pointer_cast<TChild>(loader.second))
+      {
+        for (const auto& new_loader : functor(std::dynamic_pointer_cast<TChild>(loader.second)))
+        {
+          if (new_loaders.count(new_loader->get_name()) > 0)
+          {
+            throw std::runtime_error(XTI_TO_STRING("Loader " << new_loader->get_name() << " already exists"));
+          }
+          new_loaders[new_loader->get_name()] = new_loader;
+        }
+      }
+      else
+      {
+        if (fail_on_invalid_type)
+        {
+          throw std::runtime_error(XTI_TO_STRING("Loader " << loader.first << " is not of type " << typeid(TChild).name()));
+        }
+        else
+        {
+          new_loaders[loader.first] = loader.second;
+        }
+      }
+    }
+    m_loaders = std::move(new_loaders);
+  }
+
 private:
   std::map<std::string, std::shared_ptr<Loader>> m_loaders;
 };
 
+template <typename TFunctor>
+void Loader::apply(TFunctor&& functor, bool fail_on_invalid_type)
+{
+  if (dynamic_cast<NamedDataLoader*>(this))
+  {
+    dynamic_cast<NamedDataLoader*>(this)->apply(std::move(functor), fail_on_invalid_type);
+  }
+  else
+  {
+    throw std::runtime_error(XTI_TO_STRING("Loader " << typeid(*this).name() << " is not of type NamedDataLoader"));
+  }
+}
 
 
 
@@ -1287,12 +1341,14 @@ namespace cam_ops {
 class Op
 {
 public:
-  virtual std::vector<std::shared_ptr<CameraLoader>> create(std::shared_ptr<CameraLoader> camera) const = 0;
+  virtual std::vector<std::shared_ptr<CameraLoader>> operator()(std::shared_ptr<CameraLoader> camera) const = 0;
 };
 
 class Tile : public Op
 {
 public:
+  using result_type = CameraLoader;
+
   Tile(xti::vec2u tile_shape, std::optional<xti::vec2u> tile_crop_margin)
     : m_tile_shape(tile_shape)
   {
@@ -1306,7 +1362,7 @@ public:
     }
   }
 
-  std::vector<std::shared_ptr<CameraLoader>> create(std::shared_ptr<CameraLoader> camera) const
+  std::vector<std::shared_ptr<CameraLoader>> operator()(std::shared_ptr<CameraLoader> camera) const
   {
     std::vector<std::shared_ptr<CameraLoader>> result;
 
@@ -1367,12 +1423,14 @@ private:
 class Resize : public Op
 {
 public:
+  using result_type = CameraLoader;
+
   Resize(std::function<float(const CameraLoader&)> scale_op)
     : m_scale_op(scale_op)
   {
   }
 
-  std::vector<std::shared_ptr<CameraLoader>> create(std::shared_ptr<CameraLoader> camera) const
+  std::vector<std::shared_ptr<CameraLoader>> operator()(std::shared_ptr<CameraLoader> camera) const
   {
     std::vector<std::shared_ptr<CameraLoader>> result;
 
@@ -1400,12 +1458,14 @@ private:
 class Filter : public Op
 {
 public:
+  using result_type = CameraLoader;
+
   Filter(std::function<bool(const CameraLoader&)> filter)
     : m_filter(filter)
   {
   }
 
-  std::vector<std::shared_ptr<CameraLoader>> create(std::shared_ptr<CameraLoader> camera) const
+  std::vector<std::shared_ptr<CameraLoader>> operator()(std::shared_ptr<CameraLoader> camera) const
   {
     std::vector<std::shared_ptr<CameraLoader>> result;
 
@@ -1424,12 +1484,14 @@ private:
 class Homography : public Op
 {
 public:
+  using result_type = CameraLoader;
+
   Homography(CamToEgoMapper mapper)
     : m_mapper(mapper)
   {
   }
 
-  std::vector<std::shared_ptr<CameraLoader>> create(std::shared_ptr<CameraLoader> camera) const
+  std::vector<std::shared_ptr<CameraLoader>> operator()(std::shared_ptr<CameraLoader> camera) const
   {
     std::vector<std::shared_ptr<CameraLoader>> result;
 
@@ -1912,7 +1974,7 @@ private:
 class FrameLoader : public NamedDataLoader
 {
 public:
-  static std::shared_ptr<FrameLoader> construct(std::filesystem::path std_path, std::vector<std::shared_ptr<cam_ops::Op>> cam_ops, std::vector<std::shared_ptr<lidar_ops::Op>> lidar_ops, std::vector<std::filesystem::path> std_updates, bool verbose)
+  static std::shared_ptr<FrameLoader> construct(std::filesystem::path std_path, std::vector<std::filesystem::path> std_updates, bool verbose)
   {
     if (verbose)
     {
@@ -1967,22 +2029,6 @@ public:
           }
         }
       }
-      for (const auto& op : cam_ops)
-      {
-        std::map<std::string, std::shared_ptr<CameraLoader>> new_camera_loaders;
-        for (const auto& old_camera_pair : camera_loaders)
-        {
-          for (const auto& new_camera : op->create(old_camera_pair.second))
-          {
-            if (new_camera_loaders.count(new_camera->get_name()))
-            {
-              throw std::runtime_error(XTI_TO_STRING("Camera " << new_camera->get_name() << " already exists"));
-            }
-            new_camera_loaders[new_camera->get_name()] = new_camera;
-          }
-        }
-        camera_loaders = std::move(new_camera_loaders);
-      }
 
       std::map<std::string, std::shared_ptr<Loader>> camera_loaders2;
       for (const auto& [camera_name, camera] : camera_loaders)
@@ -2030,22 +2076,6 @@ public:
             throw std::runtime_error(XTI_TO_STRING("Error while loading lidar meta-data at " << child_path.string() << ":\n" << e.what()));
           }
         }
-      }
-      for (const auto& op : lidar_ops)
-      {
-        std::map<std::string, std::shared_ptr<LidarLoader>> new_lidar_loaders;
-        for (const auto& old_lidar_pair : lidar_loaders)
-        {
-          for (const auto& new_lidar : op->create(old_lidar_pair.second))
-          {
-            if (new_lidar_loaders.count(new_lidar->get_name()))
-            {
-              throw std::runtime_error(XTI_TO_STRING("Lidar " << new_lidar->get_name() << " already exists"));
-            }
-            new_lidar_loaders[new_lidar->get_name()] = new_lidar;
-          }
-        }
-        lidar_loaders = std::move(new_lidar_loaders);
       }
 
       std::map<std::string, std::shared_ptr<Loader>> lidar_loaders2;
